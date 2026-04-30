@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Local IDE/editor state
+.vscode/
+.idea/
+
+# Runtime outputs
+output/
+runs/
+checkpoints/
+logs/
+results/
+
+# Model/data artifacts
+*.pth
+*.pt
+*.npy
+*.npz
+*.mat
+*.mp4
+
+# External resource directories if copied or linked into this project
+dataset/
+WiMANS-main/
+X-Fi-main/
+reference_paper/
+backbone_models/
+
+# OS noise
+.DS_Store
+Thumbs.db
