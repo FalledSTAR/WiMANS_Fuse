@@ -113,6 +113,15 @@ V1:
 python train.py --config config\config.yaml --stage v1
 ```
 
+Laptop-sized V1 training check:
+
+```powershell
+python train.py --config config\config.yaml --stage v1 --sample-limit 2 --num-frames 16 --s3d-weights none
+```
+
+The command above is only for checking the training path on the 3050 laptop.
+Use the default `s3d_weights: kinetics400` and larger data settings on the 4080S.
+
 ## 4080S Transfer Notes
 
 Copy the entire `WiMANS_Baseline/` folder, including the hidden `.git/` directory.

@@ -19,6 +19,9 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(PROJECT_ROOT / "config" / "config.yaml"))
     parser.add_argument("--stage", choices=["v0", "v1"], default="v0")
+    parser.add_argument("--sample-limit", type=int, default=None)
+    parser.add_argument("--num-frames", type=int, default=None)
+    parser.add_argument("--s3d-weights", default=None)
     return parser.parse_args()
 
 
@@ -39,12 +42,13 @@ def build_loaders(cfg, use_video: bool):
         sample_limit=cfg["data"]["sample_limit"],
     )
     labels = dataframe.apply(build_single_user_label, axis=1)
+    stratify_labels = labels if labels.value_counts().min() >= 2 and len(labels.unique()) <= int(len(dataframe) * float(cfg["data"]["test_size"])) else None
     train_df, val_df = train_test_split(
         dataframe,
         test_size=float(cfg["data"]["test_size"]),
         shuffle=True,
         random_state=int(cfg["experiment"]["seed"]),
-        stratify=labels,
+        stratify=stratify_labels,
     )
 
     dataset_kwargs = {
@@ -142,6 +146,12 @@ def evaluate(model, loader, device, stage):
 def main():
     args = parse_args()
     cfg = load_config(args.config)
+    if args.sample_limit is not None:
+        cfg["data"]["sample_limit"] = args.sample_limit
+    if args.num_frames is not None:
+        cfg["video"]["num_frames"] = args.num_frames
+    if args.s3d_weights is not None:
+        cfg["video"]["s3d_weights"] = args.s3d_weights
     seed_everything(int(cfg["experiment"]["seed"]))
     device = select_device(cfg["train"]["device"])
 

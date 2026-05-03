@@ -35,6 +35,25 @@ recorded here before moving the project to the 4080S machine.
     - `trainable_teacher_params=0`
     - checkpoint saved and reloaded from `output\smoke_v1\checkpoint.pt`
 
+## v0.1.1 - 2026-05-03
+
+- Commit: `4c5bbfd`
+- Changes:
+  - Set default `train.batch_size` to `1` for the current RTX 3050 smoke-training workflow.
+  - Added training CLI overrides: `--sample-limit`, `--num-frames`, and `--s3d-weights`.
+  - Made train/validation splitting fall back to non-stratified split for tiny sample-limit runs.
+- Problems found:
+  - Full V1 online S3D training is not appropriate for the 3050 laptop; use the 4080S for full V1.
+  - For V1 laptop validation, use random S3D weights via `--s3d-weights none` to avoid pretrained-weight download.
+- Validation commands:
+  - `python train.py --config config\config.yaml --stage v0`
+  - `python train.py --config config\config.yaml --stage v1 --sample-limit 2 --num-frames 16 --s3d-weights none`
+- Validation result:
+  - V0 full 5GHz single-user epoch completed on RTX 3050:
+    - `epoch=1 train_loss=2.052317 train_acc=0.202105 val_loss=4.460630 val_acc=0.084034`
+  - V1 tiny online-video training completed on RTX 3050:
+    - `epoch=1 train_loss=2.324833 train_acc=0.000000 val_loss=2.429820 val_acc=0.000000`
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.

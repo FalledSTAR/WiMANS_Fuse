@@ -47,7 +47,7 @@ cafd:
 
 train:
   epochs: 1
-  batch_size: 2
+  batch_size: 1
   num_workers: 0
   lr_backbone: 1.0e-5
   lr_head: 1.0e-4
