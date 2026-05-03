@@ -37,7 +37,7 @@ recorded here before moving the project to the 4080S machine.
 
 ## v0.1.1 - 2026-05-03
 
-- Commit: `4c5bbfd`
+- Code and validation commit: `b287ab6`
 - Changes:
   - Set default `train.batch_size` to `1` for the current RTX 3050 smoke-training workflow.
   - Added training CLI overrides: `--sample-limit`, `--num-frames`, and `--s3d-weights`.
