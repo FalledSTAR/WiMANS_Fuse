@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import torch
+import yaml
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 
@@ -12,7 +13,18 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from datasets import WiMANSHARDataset, build_single_user_dataframe, build_single_user_label  # noqa: E402
 from losses import CAFDLoss, classification_loss  # noqa: E402
 from models import VideoWiFiCAFDModel, XFiWiFiStudent  # noqa: E402
-from utils import accuracy_top1, load_config, resolve_path, save_checkpoint, seed_everything  # noqa: E402
+from utils import (  # noqa: E402
+    accuracy_top1,
+    append_csv_rows,
+    build_model_summary,
+    create_run_dir,
+    load_config,
+    resolve_path,
+    save_checkpoint,
+    save_yaml,
+    seed_everything,
+    setup_run_logger,
+)
 
 
 def parse_args():
@@ -77,7 +89,7 @@ def build_loaders(cfg, use_video: bool):
         num_workers=int(cfg["train"]["num_workers"]),
         pin_memory=torch.cuda.is_available(),
     )
-    return train_loader, val_loader
+    return train_loader, val_loader, train_df, val_df
 
 
 def build_model(cfg, stage: str):
@@ -96,11 +108,13 @@ def build_model(cfg, stage: str):
     )
 
 
-def run_epoch(model, loader, optimizer, device, stage, cfg, cafd_loss_fn=None):
+def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_loss_fn=None, logger=None, batch_csv_path=None):
     model.train()
     total_loss = 0.0
     total_acc = 0.0
-    for batch in loader:
+    batch_rows = []
+    log_interval = max(int(cfg["train"].get("log_interval", 50)), 1)
+    for batch_idx, batch in enumerate(loader, start=1):
         wifi = batch["wifi"].float().to(device)
         labels = batch["label"].to(device)
         optimizer.zero_grad()
@@ -108,6 +122,8 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, cafd_loss_fn=None):
         if stage == "v0":
             logits = model(wifi)
             loss = classification_loss(logits, labels, "single_ce")
+            cls_loss_value = float(loss.item())
+            cafd_loss_value = None
         else:
             video = batch["video"].float().to(device)
             outputs = model(wifi, video)
@@ -115,11 +131,45 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, cafd_loss_fn=None):
             cls_loss = classification_loss(logits, labels, "single_ce")
             cafd_loss = cafd_loss_fn(outputs["wifi_projected"], outputs["video_projected"])
             loss = cls_loss + float(cfg["cafd"]["lambda_cafd"]) * cafd_loss
+            cls_loss_value = float(cls_loss.item())
+            cafd_loss_value = float(cafd_loss.item())
 
         loss.backward()
         optimizer.step()
+        batch_acc = accuracy_top1(logits.detach(), labels.detach())
         total_loss += float(loss.item())
-        total_acc += accuracy_top1(logits.detach(), labels.detach())
+        total_acc += batch_acc
+
+        row = {
+            "epoch": epoch,
+            "batch": batch_idx,
+            "samples_seen": batch_idx * int(cfg["train"]["batch_size"]),
+            "loss": float(loss.item()),
+            "classification_loss": cls_loss_value,
+            "cafd_loss": cafd_loss_value,
+            "accuracy": batch_acc,
+            "batch_size": int(labels.shape[0]),
+        }
+        batch_rows.append(row)
+
+        if logger is not None and (batch_idx == 1 or batch_idx % log_interval == 0 or batch_idx == len(loader)):
+            logger.info(
+                "train epoch=%s batch=%s/%s loss=%.6f cls_loss=%.6f cafd_loss=%s acc=%.6f",
+                epoch,
+                batch_idx,
+                len(loader),
+                row["loss"],
+                row["classification_loss"],
+                "None" if row["cafd_loss"] is None else f"{row['cafd_loss']:.6f}",
+                row["accuracy"],
+            )
+
+    if batch_csv_path is not None:
+        append_csv_rows(
+            batch_csv_path,
+            batch_rows,
+            ["epoch", "batch", "samples_seen", "loss", "classification_loss", "cafd_loss", "accuracy", "batch_size"],
+        )
 
     return total_loss / max(len(loader), 1), total_acc / max(len(loader), 1)
 
@@ -155,8 +205,37 @@ def main():
     seed_everything(int(cfg["experiment"]["seed"]))
     device = select_device(cfg["train"]["device"])
 
-    train_loader, val_loader = build_loaders(cfg, use_video=args.stage == "v1")
-    model = build_model(cfg, args.stage).to(device)
+    run_dir = create_run_dir(
+        PROJECT_ROOT,
+        cfg["experiment"]["output_dir"],
+        cfg["experiment"]["name"],
+        args.stage,
+    )
+    logger = setup_run_logger(run_dir / "train.log")
+    logger.info("run_dir=%s", run_dir)
+    logger.info("stage=%s", args.stage)
+    logger.info("device=%s", device)
+    logger.info("effective_config:\n%s", yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False))
+    save_yaml(run_dir / "config.yaml", cfg)
+
+    train_loader, val_loader, train_df, val_df = build_loaders(cfg, use_video=args.stage == "v1")
+    train_df.to_csv(run_dir / "splits" / "train.csv", index=False, encoding="utf-8-sig")
+    val_df.to_csv(run_dir / "splits" / "val.csv", index=False, encoding="utf-8-sig")
+    logger.info("dataset_split train=%s val=%s", len(train_df), len(val_df))
+    logger.info("saved_train_split=%s", run_dir / "splits" / "train.csv")
+    logger.info("saved_val_split=%s", run_dir / "splits" / "val.csv")
+
+    model = build_model(cfg, args.stage)
+    model_text = str(model)
+    (run_dir / "model.txt").write_text(model_text, encoding="utf-8")
+    logger.info("model_structure:\n%s", model_text)
+    if bool(cfg.get("logging", {}).get("compute_flops", True)):
+        model_summary = build_model_summary(model, args.stage, cfg)
+    else:
+        model_summary = {"stage": args.stage, "flops": {"available": False, "error": "disabled by config"}}
+    save_yaml(run_dir / "model_summary.yaml", model_summary)
+    logger.info("model_summary:\n%s", yaml.safe_dump(model_summary, allow_unicode=True, sort_keys=False))
+    model = model.to(device)
 
     optimizer = torch.optim.AdamW(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
@@ -172,22 +251,55 @@ def main():
         )
 
     best_acc = -1.0
-    output_dir = PROJECT_ROOT / cfg["experiment"]["output_dir"] / args.stage
+    checkpoint_dir = run_dir / "checkpoints"
+    epoch_rows = []
     for epoch in range(int(cfg["train"]["epochs"])):
-        train_loss, train_acc = run_epoch(model, train_loader, optimizer, device, args.stage, cfg, cafd_loss_fn)
+        train_loss, train_acc = run_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            args.stage,
+            cfg,
+            epoch=epoch + 1,
+            cafd_loss_fn=cafd_loss_fn,
+            logger=logger,
+            batch_csv_path=run_dir / "metrics" / "train_batches.csv",
+        )
         val_loss, val_acc = evaluate(model, val_loader, device, args.stage)
-        print(
+        message = (
             f"epoch={epoch + 1} train_loss={train_loss:.6f} train_acc={train_acc:.6f} "
             f"val_loss={val_loss:.6f} val_acc={val_acc:.6f}"
+        )
+        print(message)
+        logger.info(message)
+        epoch_rows.append(
+            {
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "train_acc": train_acc,
+                "val_loss": val_loss,
+                "val_acc": val_acc,
+                "best_acc": max(best_acc, val_acc),
+            }
+        )
+        append_csv_rows(
+            run_dir / "metrics" / "epochs.csv",
+            [epoch_rows[-1]],
+            ["epoch", "train_loss", "train_acc", "val_loss", "val_acc", "best_acc"],
         )
         if val_acc > best_acc:
             best_acc = val_acc
             save_checkpoint(
-                str(output_dir / "best.pt"),
+                str(checkpoint_dir / "best.pt"),
                 model,
                 optimizer,
                 extra={"epoch": epoch + 1, "val_acc": best_acc, "stage": args.stage},
             )
+            logger.info("saved_best_checkpoint=%s val_acc=%.6f", checkpoint_dir / "best.pt", best_acc)
+
+    logger.info("training_finished best_acc=%.6f", best_acc)
+    logger.info("run_artifacts config=%s model=%s summary=%s splits=%s metrics=%s", run_dir / "config.yaml", run_dir / "model.txt", run_dir / "model_summary.yaml", run_dir / "splits", run_dir / "metrics")
 
 
 if __name__ == "__main__":

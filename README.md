@@ -122,6 +122,37 @@ python train.py --config config\config.yaml --stage v1 --sample-limit 2 --num-fr
 The command above is only for checking the training path on the 3050 laptop.
 Use the default `s3d_weights: kinetics400` and larger data settings on the 4080S.
 
+## Run Outputs
+
+Every training run creates a unique timestamped directory:
+
+```text
+output/<experiment.name>/<stage>/<YYYYMMDD_HHMMSS>/
+```
+
+Each run directory contains:
+
+```text
+config.yaml                 # effective config after CLI overrides
+train.log                   # config, split paths, model structure, params/FLOPs, training details
+model.txt                   # full model structure
+model_summary.yaml          # parameter counts and MAC/FLOP estimates
+splits/train.csv            # saved training split
+splits/val.csv              # saved validation split
+metrics/train_batches.csv   # per-batch training loss/accuracy details
+metrics/epochs.csv          # per-epoch train/validation summary
+checkpoints/best.pt         # best validation checkpoint
+```
+
+Current 3050 validation run:
+
+```text
+output/wimans_5g_single_baseline/v0/20260506_094705
+```
+
+That run used full 5 GHz single-user data with `batch_size: 1`, saving `1425`
+training rows and `357` validation rows.
+
 ## 4080S Transfer Notes
 
 Copy the entire `WiMANS_Baseline/` folder, including the hidden `.git/` directory.

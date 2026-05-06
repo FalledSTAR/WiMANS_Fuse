@@ -25,7 +25,7 @@ def main():
     seed_everything(int(cfg["experiment"]["seed"]))
     device = select_device(cfg["train"]["device"])
 
-    _, val_loader = build_loaders(cfg, use_video=args.stage == "v1")
+    _, val_loader, _, _ = build_loaders(cfg, use_video=args.stage == "v1")
     model = build_model(cfg, args.stage).to(device)
     load_checkpoint(args.checkpoint, model, map_location=device)
     loss, acc = evaluate(model, val_loader, device, args.stage)

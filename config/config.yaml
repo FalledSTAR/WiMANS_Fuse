@@ -49,6 +49,7 @@ train:
   epochs: 1
   batch_size: 1
   num_workers: 0
+  log_interval: 50
   lr_backbone: 1.0e-5
   lr_head: 1.0e-4
   lr_projector: 1.0e-4
@@ -59,3 +60,7 @@ train:
 test:
   checkpoint: null
   threshold: 0.5
+
+logging:
+  compute_flops: true
+  flops_video_frames: 16

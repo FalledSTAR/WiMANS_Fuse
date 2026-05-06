@@ -137,8 +137,8 @@ def load_xfi_wifi_resnet18(weight_path: str, map_location="cpu") -> nn.Module:
 class XFiWiFiStudent(nn.Module):
     def __init__(self, weight_path: str, num_classes: int = 9, freeze_backbone: bool = False):
         super().__init__()
-        self.backbone = load_xfi_wifi_resnet18(weight_path, map_location="cpu")
-        self.feature_extractor = nn.Sequential(*list(self.backbone.children())[:-2])
+        backbone = load_xfi_wifi_resnet18(weight_path, map_location="cpu")
+        self.feature_extractor = nn.Sequential(*list(backbone.children())[:-2])
         self.feature_dim = 512
         self.classifier = nn.Linear(self.feature_dim, num_classes)
 

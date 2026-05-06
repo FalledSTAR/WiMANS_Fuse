@@ -54,6 +54,33 @@ recorded here before moving the project to the 4080S machine.
   - V1 tiny online-video training completed on RTX 3050:
     - `epoch=1 train_loss=2.324833 train_acc=0.000000 val_loss=2.429820 val_acc=0.000000`
 
+## v0.1.2 - 2026-05-06
+
+- Commit: `PENDING`
+- Changes:
+  - Added timestamped run directories under `output/<experiment>/<stage>/<YYYYMMDD_HHMMSS>/`.
+  - Added `train.log` with effective config, dataset split paths, model structure, parameter counts, MAC/FLOP estimates, and detailed training progress.
+  - Added saved run artifacts: `config.yaml`, `model.txt`, `model_summary.yaml`, `splits/train.csv`, `splits/val.csv`, `metrics/train_batches.csv`, `metrics/epochs.csv`, and `checkpoints/best.pt`.
+  - Added CLI-safe model profiling utilities and cleaned the X-Fi WiFi student so only actively used feature layers and the 9-class head are registered.
+- Problems found:
+  - The previous WiFi student kept the original unused 55-class X-Fi head registered through `self.backbone`; this made model structure and parameter/FLOP logs noisy. It is now removed from the registered training model.
+  - Full V1 online S3D should still be trained on the 4080S. The 3050 is suitable for V1 tiny checks only.
+- Validation commands:
+  - `python -m compileall WiMANS_Baseline\train.py WiMANS_Baseline\test.py WiMANS_Baseline\utils`
+  - `python train.py --config config\config.yaml --stage v0 --sample-limit 8`
+  - `python train.py --config config\config.yaml --stage v1 --sample-limit 2 --num-frames 16 --s3d-weights none`
+  - `python train.py --config config\config.yaml --stage v0`
+- Validation result:
+  - V0 small logging run created all expected run artifacts.
+  - V1 tiny online-video logging run created all expected run artifacts.
+  - Full V0 5 GHz single-user batch-size-1 run completed on RTX 3050:
+    - Run directory: `output/wimans_5g_single_baseline/v0/20260506_094705`
+    - `train=1425`, `val=357`
+    - `epoch=1 train_loss=2.052317 train_acc=0.202105 val_loss=4.460630 val_acc=0.084034`
+    - Model parameters: `5,287,177`
+    - Model MACs: `663,320,841`
+    - Approx FLOPs: `1,326,641,682`
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.

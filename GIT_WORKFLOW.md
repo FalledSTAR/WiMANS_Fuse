@@ -93,3 +93,10 @@ Keep the 4080S changes in git:
 git add config/config.yaml CHANGELOG.md
 git commit -m "config: adapt training settings for 4080S"
 ```
+
+Training outputs are intentionally ignored by git. Before deleting or moving a run,
+copy the timestamped folder if you need its logs, split CSV files, metrics, or checkpoint:
+
+```text
+output/<experiment.name>/<stage>/<YYYYMMDD_HHMMSS>/
+```
