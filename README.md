@@ -107,6 +107,9 @@ V0:
 python train.py --config config\config.yaml --stage v0
 ```
 
+The default V0 config currently uses `epochs: 8` and `batch_size: 1` for the RTX 3050
+laptop check.
+
 V1:
 
 ```powershell
@@ -121,6 +124,37 @@ python train.py --config config\config.yaml --stage v1 --sample-limit 2 --num-fr
 
 The command above is only for checking the training path on the 3050 laptop.
 Use the default `s3d_weights: kinetics400` and larger data settings on the 4080S.
+
+## Testing And Predictions
+
+Evaluate a saved checkpoint and write prediction-vs-ground-truth rows into the run
+`splits/` directory:
+
+```powershell
+python test.py --config output\wimans_5g_single_baseline\v0\<RUN_ID>\config.yaml --stage v0 --checkpoint output\wimans_5g_single_baseline\v0\<RUN_ID>\checkpoints\best.pt
+```
+
+The default output is:
+
+```text
+output/wimans_5g_single_baseline/v0/<RUN_ID>/splits/test_predictions.csv
+```
+
+Prediction CSV files include `sample_id`, true class, predicted class, correctness,
+loss, and per-class probabilities.
+
+## Head Strategy Check
+
+The default V0 model follows the X-Fi single-modality style: X-Fi WiFi feature
+extractor tokens are mean-pooled, normalized with `LayerNorm`, and passed through
+a new `Linear(512, 9)` head. A direct `backbone.fc = Linear(512, 9)` comparison
+is available for sanity checks:
+
+```powershell
+python scripts\compare_head_strategies.py --config config\config.yaml --sample-limit 90 --epochs 2 --batch-size 1
+```
+
+This comparison is a plumbing and early-signal check, not a final accuracy benchmark.
 
 ## Run Outputs
 
@@ -139,6 +173,8 @@ model.txt                   # full model structure
 model_summary.yaml          # parameter counts and MAC/FLOP estimates
 splits/train.csv            # saved training split
 splits/val.csv              # saved validation split
+splits/val_predictions_*.csv # validation prediction-vs-ground-truth files
+splits/test_predictions.csv # test.py prediction-vs-ground-truth file
 metrics/train_batches.csv   # per-batch training loss/accuracy details
 metrics/epochs.csv          # per-epoch train/validation summary
 checkpoints/best.pt         # best validation checkpoint
@@ -147,11 +183,13 @@ checkpoints/best.pt         # best validation checkpoint
 Current 3050 validation run:
 
 ```text
-output/wimans_5g_single_baseline/v0/20260506_094705
+output/wimans_5g_single_baseline/v0/20260506_103030
 ```
 
-That run used full 5 GHz single-user data with `batch_size: 1`, saving `1425`
-training rows and `357` validation rows.
+That run used full 5 GHz single-user data with `batch_size: 1` and `epochs: 8`,
+saving `1425` training rows and `357` validation rows. Best validation accuracy
+was `0.131653` at epoch 2; the training path is functional, but this laptop run
+does not yet show stable generalization.
 
 ## 4080S Transfer Notes
 
