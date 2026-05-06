@@ -56,7 +56,7 @@ recorded here before moving the project to the 4080S machine.
 
 ## v0.1.2 - 2026-05-06
 
-- Commit: `PENDING`
+- Code and validation commit: `365b2d0`
 - Changes:
   - Added timestamped run directories under `output/<experiment>/<stage>/<YYYYMMDD_HHMMSS>/`.
   - Added `train.log` with effective config, dataset split paths, model structure, parameter counts, MAC/FLOP estimates, and detailed training progress.
