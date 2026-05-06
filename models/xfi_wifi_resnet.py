@@ -140,6 +140,7 @@ class XFiWiFiStudent(nn.Module):
         backbone = load_xfi_wifi_resnet18(weight_path, map_location="cpu")
         self.feature_extractor = nn.Sequential(*list(backbone.children())[:-2])
         self.feature_dim = 512
+        self.norm = nn.LayerNorm(self.feature_dim)
         self.classifier = nn.Linear(self.feature_dim, num_classes)
 
         if freeze_backbone:
@@ -154,7 +155,25 @@ class XFiWiFiStudent(nn.Module):
     def forward(self, wifi: torch.Tensor, return_features: bool = False):
         tokens = self.extract_tokens(wifi)
         pooled = tokens.mean(dim=1)
-        logits = self.classifier(pooled)
+        logits = self.classifier(self.norm(pooled))
         if return_features:
             return {"logits": logits, "feature": pooled, "tokens": tokens}
+        return logits
+
+
+class XFiWiFiOriginalFC(nn.Module):
+    def __init__(self, weight_path: str, num_classes: int = 9, freeze_backbone: bool = False):
+        super().__init__()
+        self.backbone = load_xfi_wifi_resnet18(weight_path, map_location="cpu")
+        self.feature_dim = self.backbone.fc.in_features
+        self.backbone.fc = nn.Linear(self.feature_dim, num_classes)
+
+        if freeze_backbone:
+            for name, parameter in self.backbone.named_parameters():
+                parameter.requires_grad = name.startswith("fc.")
+
+    def forward(self, wifi: torch.Tensor, return_features: bool = False):
+        logits = self.backbone(wifi)
+        if return_features:
+            return {"logits": logits}
         return logits

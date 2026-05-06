@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from datasets import WiMANSHARDataset, build_single_user_dataframe, build_single_user_label  # noqa: E402
+from datasets import ID_TO_ACTIVITY, WiMANSHARDataset, build_single_user_dataframe, build_single_user_label  # noqa: E402
 from losses import CAFDLoss, classification_loss  # noqa: E402
 from models import VideoWiFiCAFDModel, XFiWiFiStudent  # noqa: E402
 from utils import (  # noqa: E402
@@ -193,6 +193,54 @@ def evaluate(model, loader, device, stage):
     return total_loss / max(len(loader), 1), total_acc / max(len(loader), 1)
 
 
+@torch.no_grad()
+def collect_predictions(model, loader, device, stage):
+    model.eval()
+    rows = []
+    total_acc = 0.0
+    total_loss = 0.0
+    for batch in loader:
+        wifi = batch["wifi"].float().to(device)
+        labels = batch["label"].to(device)
+        if stage == "v0":
+            logits = model(wifi)
+        else:
+            video = batch["video"].float().to(device)
+            logits = model(wifi, video)["logits"]
+
+        loss = classification_loss(logits, labels, "single_ce")
+        probs = torch.softmax(logits, dim=-1)
+        pred_ids = probs.argmax(dim=-1)
+        correct = pred_ids.eq(labels.long())
+        total_loss += float(loss.item())
+        total_acc += correct.float().mean().item()
+
+        sample_ids = batch["sample_id"]
+        if isinstance(sample_ids, str):
+            sample_ids = [sample_ids]
+
+        for item_idx, sample_id in enumerate(sample_ids):
+            true_id = int(labels[item_idx].detach().cpu().item())
+            pred_id = int(pred_ids[item_idx].detach().cpu().item())
+            item_probs = probs[item_idx].detach().cpu().tolist()
+            row = {
+                "sample_id": sample_id,
+                "true_id": true_id,
+                "true_activity": ID_TO_ACTIVITY[true_id],
+                "pred_id": pred_id,
+                "pred_activity": ID_TO_ACTIVITY[pred_id],
+                "correct": int(bool(correct[item_idx].detach().cpu().item())),
+                "pred_probability": float(item_probs[pred_id]),
+                "true_probability": float(item_probs[true_id]),
+                "loss": float(loss.item()),
+            }
+            for class_id, class_name in ID_TO_ACTIVITY.items():
+                row[f"prob_{class_id}_{class_name}"] = float(item_probs[class_id])
+            rows.append(row)
+
+    return total_loss / max(len(loader), 1), total_acc / max(len(loader), 1), rows
+
+
 def main():
     args = parse_args()
     cfg = load_config(args.config)
@@ -266,7 +314,12 @@ def main():
             logger=logger,
             batch_csv_path=run_dir / "metrics" / "train_batches.csv",
         )
-        val_loss, val_acc = evaluate(model, val_loader, device, args.stage)
+        val_loss, val_acc, prediction_rows = collect_predictions(model, val_loader, device, args.stage)
+        prediction_fieldnames = list(prediction_rows[0].keys()) if prediction_rows else []
+        if prediction_rows:
+            prediction_path = run_dir / "splits" / f"val_predictions_epoch_{epoch + 1:03d}.csv"
+            append_csv_rows(prediction_path, prediction_rows, prediction_fieldnames)
+            logger.info("saved_val_predictions=%s", prediction_path)
         message = (
             f"epoch={epoch + 1} train_loss={train_loss:.6f} train_acc={train_acc:.6f} "
             f"val_loss={val_loss:.6f} val_acc={val_acc:.6f}"
@@ -296,6 +349,11 @@ def main():
                 optimizer,
                 extra={"epoch": epoch + 1, "val_acc": best_acc, "stage": args.stage},
             )
+            if prediction_rows:
+                best_prediction_path = run_dir / "splits" / "val_predictions_best.csv"
+                best_prediction_path.unlink(missing_ok=True)
+                append_csv_rows(best_prediction_path, prediction_rows, prediction_fieldnames)
+                logger.info("saved_best_val_predictions=%s", best_prediction_path)
             logger.info("saved_best_checkpoint=%s val_acc=%.6f", checkpoint_dir / "best.pt", best_acc)
 
     logger.info("training_finished best_acc=%.6f", best_acc)

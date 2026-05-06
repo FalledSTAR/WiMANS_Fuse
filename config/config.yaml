@@ -46,7 +46,7 @@ cafd:
   lambda_cafd: 0.1
 
 train:
-  epochs: 1
+  epochs: 8
   batch_size: 1
   num_workers: 0
   log_interval: 50
