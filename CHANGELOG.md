@@ -81,6 +81,53 @@ recorded here before moving the project to the 4080S machine.
     - Model MACs: `663,320,841`
     - Approx FLOPs: `1,326,641,682`
 
+## v0.1.3 - 2026-05-06
+
+- Code and validation commit: `f616f8a`
+- Changes:
+  - Set default V0 laptop check to `epochs: 8` with `batch_size: 1`.
+  - Added validation prediction export during training:
+    - `splits/val_predictions_epoch_*.csv`
+    - `splits/val_predictions_best.csv`
+  - Added `test.py` prediction export:
+    - default path is `splits/test_predictions.csv` beside the checkpoint run directory.
+  - Added per-sample prediction rows with true label, predicted label, correctness, loss, and per-class probabilities.
+  - Updated the X-Fi WiFi student head to match the X-Fi single-modality style more closely:
+    - mean pooled 512-d WiFi feature
+    - `LayerNorm(512)`
+    - `Linear(512, 9)`
+  - Added `XFiWiFiOriginalFC` and `scripts/compare_head_strategies.py` for comparing the feature-head route against direct `fc` replacement.
+- Problems found:
+  - Per-batch `acc=0` is expected when `batch_size=1`; each batch accuracy can only be `0` or `1`.
+  - The 8-epoch V0 run updates parameters successfully, but validation accuracy stays low while train accuracy rises, indicating overfitting or a remaining train/validation/domain mismatch to investigate on the 4080S.
+  - The direct original-`fc` route can run, but it does not expose WiFi tokens for V1 CAFD; the feature-head route remains the default for V0/V1 consistency.
+- Validation commands:
+  - `python -m compileall .\WiMANS_Baseline\models\xfi_wifi_resnet.py .\WiMANS_Baseline\models\__init__.py .\WiMANS_Baseline\train.py .\WiMANS_Baseline\test.py .\WiMANS_Baseline\scripts\compare_head_strategies.py`
+  - `python scripts\compare_head_strategies.py --config config\config.yaml --sample-limit 90 --epochs 2 --batch-size 1`
+  - `python train.py --config config\config.yaml --stage v0`
+  - `python test.py --config output\wimans_5g_single_baseline\v0\20260506_103030\config.yaml --stage v0 --checkpoint output\wimans_5g_single_baseline\v0\20260506_103030\checkpoints\best.pt`
+- Validation result:
+  - Static compile passed.
+  - Head comparison run:
+    - Run directory: `output/head_strategy_compare/v0/20260506_102943`
+    - `xfi_feature_head`: best epoch `1`, best val acc `0.055556`
+    - `original_fc_replace`: best epoch `1`, best val acc `0.166667`
+    - This is a 90-sample, 2-epoch plumbing check only, not a final model-selection result.
+  - Full V0 5 GHz single-user batch-size-1 run completed on RTX 3050:
+    - Run directory: `output/wimans_5g_single_baseline/v0/20260506_103030`
+    - `train=1425`, `val=357`
+    - Epoch 1: `train_loss=2.115181 train_acc=0.204211 val_loss=2.575579 val_acc=0.126050`
+    - Epoch 2: `train_loss=1.682299 train_acc=0.352281 val_loss=3.680732 val_acc=0.131653`
+    - Epoch 8: `train_loss=0.834449 train_acc=0.672281 val_loss=6.038251 val_acc=0.126050`
+    - Best validation accuracy: `0.131653` at epoch 2.
+    - Model parameters: `5,288,201`
+    - Model MACs: `663,321,353`
+    - Approx FLOPs: `1,326,642,706`
+    - Batch accuracy rows: `11400` total, `5923` rows with acc `0`, `5477` rows with acc `1`.
+  - Test entrypoint loaded the best checkpoint and saved predictions:
+    - `test_loss=3.680732 test_acc=0.131653`
+    - `output/wimans_5g_single_baseline/v0/20260506_103030/splits/test_predictions.csv`
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.
