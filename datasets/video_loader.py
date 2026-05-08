@@ -15,10 +15,10 @@ def _sample_temporal(video: torch.Tensor, num_frames: int) -> torch.Tensor:
     return video[:, indices]
 
 
-class OnlineS3DVideoLoader:
-    def __init__(self, num_frames: int = 90):
+class OnlineVideoLoader:
+    def __init__(self, num_frames: int = 90, transform=None):
         self.num_frames = num_frames
-        self.transform = S3D_Weights.DEFAULT.transforms()
+        self.transform = transform or S3D_Weights.DEFAULT.transforms()
 
     def __call__(self, path: str) -> torch.Tensor:
         path_obj = Path(path)
@@ -29,3 +29,6 @@ class OnlineS3DVideoLoader:
         video = self.transform(video)
         video = _sample_temporal(video, self.num_frames)
         return video.float()
+
+
+OnlineS3DVideoLoader = OnlineVideoLoader

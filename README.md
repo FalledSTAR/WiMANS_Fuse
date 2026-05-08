@@ -8,7 +8,8 @@ resources in git.
 ## Goals
 
 - V0: run a stable 5 GHz single-user WiFi-only HAR baseline with X-Fi WiFi ResNet-18 initialization.
-- V1: add online Frozen S3D video teacher, Hybrid Projector, and CAFD feature relation distillation.
+- Video teacher: train a selectable WiMANS-style visual teacher before distillation.
+- V1: add frozen trained video teacher, Hybrid Projector, and CAFD/BLEND-style feature relation distillation.
 - Keep the local laptop workflow focused on smoke tests and small runs.
 - Move the whole project, including `.git/`, to the 4080S machine for full training.
 
@@ -19,13 +20,15 @@ The global random seed is fixed to `39` for Python, NumPy, PyTorch, and CUDA.
 ```text
 WiMANS_Baseline/
 |-- config/
-|   `-- config.yaml
+|   |-- config.yaml
+|   `-- video_teacher.yaml
 |-- datasets/
 |-- losses/
 |-- models/
 |-- scripts/
 |-- utils/
 |-- train.py
+|-- train_video_teacher.py
 |-- test.py
 |-- README.md
 |-- CHANGELOG.md
@@ -99,6 +102,15 @@ python scripts\smoke_v1.py --config config\config.yaml --limit 1 --num-frames 16
 The V1 smoke command uses `s3d_weights=none` to avoid a pretrained-weight download on the laptop.
 For real V1 training on the 4080S machine, use `s3d_weights: kinetics400` in the config.
 
+Video teacher smoke test:
+
+```powershell
+python train_video_teacher.py --config config\video_teacher.yaml --weights none --sample-limit 4 --num-frames 16 --epochs 1 --batch-size 2 --no-flops
+```
+
+This command checks online video loading, model forward/backward, validation prediction
+export, and checkpoint saving. S3D needs at least 16 frames for this tiny smoke test.
+
 ## Training
 
 V0:
@@ -124,6 +136,40 @@ python train.py --config config\config.yaml --stage v1 --sample-limit 2 --num-fr
 
 The command above is only for checking the training path on the 3050 laptop.
 Use the default `s3d_weights: kinetics400` and larger data settings on the 4080S.
+
+Video teacher:
+
+```powershell
+python train_video_teacher.py --config config\video_teacher.yaml --model S3D
+```
+
+The video teacher follows the official WiMANS-style model switch. Supported names:
+
+```text
+S3D
+ResNet
+MViT-v1
+MViT-v2
+Swin-T
+Swin-S
+```
+
+Torchvision-style backbone names also work, for example:
+
+```powershell
+python train_video_teacher.py --config config\video_teacher.yaml --backbone r3d_18
+python train_video_teacher.py --config config\video_teacher.yaml --backbone swin3d_t --batch-size 2
+```
+
+The trained teacher checkpoint is saved under:
+
+```text
+output/wimans_5g_single_video_teacher/video_teacher/<RUN_ID>/checkpoints/best.pt
+```
+
+Use that checkpoint later as the visual teacher branch for the first distillation
+experiment. Keep `--weights none` only for smoke tests; real teacher training should
+use `weights: kinetics400`.
 
 ## Testing And Predictions
 
@@ -210,6 +256,8 @@ On the 4080S machine, update these config fields first:
 - `train.num_workers`
 - `train.epochs`
 - `video.s3d_weights`
+- `video_teacher.weights`
+- `video_teacher.backbone`
 
 Verify version history after transfer:
 
