@@ -143,6 +143,23 @@ Video teacher:
 python train_video_teacher.py --config config\video_teacher.yaml --model S3D
 ```
 
+The default video-teacher config keeps online mp4 loading and uses a 16 GB friendly
+micro-batch:
+
+```yaml
+train:
+  batch_size: 2
+  gradient_accumulation_steps: 4
+```
+
+This gives an effective batch size of `8` without storing all eight videos'
+backpropagation activations in GPU memory at once. If the 4080S still runs out of
+memory, use:
+
+```powershell
+python train_video_teacher.py --config config\video_teacher.yaml --model S3D --batch-size 1 --grad-accum-steps 8
+```
+
 The video teacher follows the official WiMANS-style model switch. Supported names:
 
 ```text
