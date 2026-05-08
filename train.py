@@ -108,6 +108,104 @@ def build_model(cfg, stage: str):
     )
 
 
+def build_optimizer(model, cfg, stage: str, logger=None) -> torch.optim.Optimizer:
+    """
+    Build AdamW optimizer with separate learning rates for the WiFi backbone
+    (feature_extractor) and all other trainable parameters (head, projectors,
+    LayerNorm, etc.).
+
+    Config keys used:
+        train.lr_backbone  – applied to wifi_student.feature_extractor
+        train.lr_head      – applied to every other trainable parameter
+        train.weight_decay – shared weight decay
+    """
+    lr_backbone = float(cfg["train"]["lr_backbone"])
+    lr_head = float(cfg["train"]["lr_head"])
+    weight_decay = float(cfg["train"]["weight_decay"])
+
+    # Collect backbone parameter ids so we can split the groups cleanly.
+    if stage == "v0":
+        # XFiWiFiStudent: feature_extractor is the pretrained backbone.
+        backbone_params = list(model.feature_extractor.parameters())
+    else:
+        # VideoWiFiCAFDModel: wifi_student.feature_extractor is the pretrained backbone.
+        # S3D teacher is frozen entirely and contributes no gradients.
+        backbone_params = list(model.wifi_student.feature_extractor.parameters())
+
+    backbone_ids = {id(p) for p in backbone_params}
+    backbone_trainable = [p for p in backbone_params if p.requires_grad]
+    other_trainable = [
+        p for p in model.parameters()
+        if p.requires_grad and id(p) not in backbone_ids
+    ]
+
+    param_groups = []
+    if backbone_trainable:
+        param_groups.append({"params": backbone_trainable, "lr": lr_backbone, "name": "backbone"})
+    if other_trainable:
+        param_groups.append({"params": other_trainable, "lr": lr_head, "name": "head_projector"})
+
+    optimizer = torch.optim.AdamW(param_groups, weight_decay=weight_decay)
+
+    if logger is not None:
+        logger.info(
+            "optimizer groups: backbone=%d params lr=%.2e | head_projector=%d params lr=%.2e | weight_decay=%.2e",
+            sum(p.numel() for p in backbone_trainable),
+            lr_backbone,
+            sum(p.numel() for p in other_trainable),
+            lr_head,
+            weight_decay,
+        )
+
+    return optimizer
+
+
+def build_scheduler(optimizer, cfg, logger=None) -> torch.optim.lr_scheduler.ReduceLROnPlateau:
+    """
+    Build a ReduceLROnPlateau scheduler that monitors val_acc (mode='max').
+
+    Config keys used (all under train.scheduler):
+        factor   – LR multiplication factor on plateau  (default 0.5)
+        patience – epochs with no improvement to wait   (default 5)
+        min_lr   – floor for any param group LR         (default 1e-7)
+
+    When val_acc stops improving for `patience` epochs, every param group's
+    LR is multiplied by `factor`, down to a minimum of `min_lr`.
+    """
+    sched_cfg = cfg.get("train", {}).get("scheduler", {})
+    factor = float(sched_cfg.get("factor", 0.5))
+    patience = int(sched_cfg.get("patience", 5))
+    min_lr = float(sched_cfg.get("min_lr", 1e-7))
+
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="max",        # we want val_acc to go UP
+        factor=factor,
+        patience=patience,
+        min_lr=min_lr,
+        verbose=False,     # we log manually below
+    )
+
+    if logger is not None:
+        logger.info(
+            "scheduler ReduceLROnPlateau: mode=max factor=%.2f patience=%d min_lr=%.2e",
+            factor,
+            patience,
+            min_lr,
+        )
+
+    return scheduler
+
+
+def get_current_lrs(optimizer) -> dict:
+    """Return current LR for each named param group as a dict."""
+    lrs = {}
+    for group in optimizer.param_groups:
+        name = group.get("name", f"group_{optimizer.param_groups.index(group)}")
+        lrs[name] = group["lr"]
+    return lrs
+
+
 def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_loss_fn=None, logger=None, batch_csv_path=None):
     model.train()
     total_loss = 0.0
@@ -285,11 +383,9 @@ def main():
     logger.info("model_summary:\n%s", yaml.safe_dump(model_summary, allow_unicode=True, sort_keys=False))
     model = model.to(device)
 
-    optimizer = torch.optim.AdamW(
-        [parameter for parameter in model.parameters() if parameter.requires_grad],
-        lr=float(cfg["train"]["lr_head"]),
-        weight_decay=float(cfg["train"]["weight_decay"]),
-    )
+    optimizer = build_optimizer(model, cfg, args.stage, logger=logger)
+    scheduler = build_scheduler(optimizer, cfg, logger=logger)
+
     cafd_loss_fn = None
     if args.stage == "v1":
         cafd_loss_fn = CAFDLoss(
@@ -301,7 +397,18 @@ def main():
     best_acc = -1.0
     checkpoint_dir = run_dir / "checkpoints"
     epoch_rows = []
+    epoch_csv_fieldnames = ["epoch", "train_loss", "train_acc", "val_loss", "val_acc", "best_acc", "lr_backbone", "lr_head_projector"]
+
     for epoch in range(int(cfg["train"]["epochs"])):
+        # Log current LRs before each epoch so we can see when scheduler fires.
+        current_lrs = get_current_lrs(optimizer)
+        logger.info(
+            "epoch=%d lr_backbone=%.2e lr_head_projector=%.2e",
+            epoch + 1,
+            current_lrs.get("backbone", float("nan")),
+            current_lrs.get("head_projector", float("nan")),
+        )
+
         train_loss, train_acc = run_epoch(
             model,
             train_loader,
@@ -315,17 +422,35 @@ def main():
             batch_csv_path=run_dir / "metrics" / "train_batches.csv",
         )
         val_loss, val_acc, prediction_rows = collect_predictions(model, val_loader, device, args.stage)
+
+        # Step scheduler based on val_acc (higher is better, mode='max').
+        scheduler.step(val_acc)
+
         prediction_fieldnames = list(prediction_rows[0].keys()) if prediction_rows else []
         if prediction_rows:
             prediction_path = run_dir / "splits" / f"val_predictions_epoch_{epoch + 1:03d}.csv"
             append_csv_rows(prediction_path, prediction_rows, prediction_fieldnames)
             logger.info("saved_val_predictions=%s", prediction_path)
+
         message = (
             f"epoch={epoch + 1} train_loss={train_loss:.6f} train_acc={train_acc:.6f} "
             f"val_loss={val_loss:.6f} val_acc={val_acc:.6f}"
         )
         print(message)
         logger.info(message)
+
+        # Log if scheduler reduced any LR this epoch.
+        new_lrs = get_current_lrs(optimizer)
+        for group_name, new_lr in new_lrs.items():
+            old_lr = current_lrs.get(group_name, new_lr)
+            if new_lr < old_lr - 1e-12:
+                logger.info(
+                    "scheduler reduced lr: %s %.2e -> %.2e",
+                    group_name,
+                    old_lr,
+                    new_lr,
+                )
+
         epoch_rows.append(
             {
                 "epoch": epoch + 1,
@@ -334,13 +459,16 @@ def main():
                 "val_loss": val_loss,
                 "val_acc": val_acc,
                 "best_acc": max(best_acc, val_acc),
+                "lr_backbone": new_lrs.get("backbone", float("nan")),
+                "lr_head_projector": new_lrs.get("head_projector", float("nan")),
             }
         )
         append_csv_rows(
             run_dir / "metrics" / "epochs.csv",
             [epoch_rows[-1]],
-            ["epoch", "train_loss", "train_acc", "val_loss", "val_acc", "best_acc"],
+            epoch_csv_fieldnames,
         )
+
         if val_acc > best_acc:
             best_acc = val_acc
             save_checkpoint(
@@ -357,7 +485,14 @@ def main():
             logger.info("saved_best_checkpoint=%s val_acc=%.6f", checkpoint_dir / "best.pt", best_acc)
 
     logger.info("training_finished best_acc=%.6f", best_acc)
-    logger.info("run_artifacts config=%s model=%s summary=%s splits=%s metrics=%s", run_dir / "config.yaml", run_dir / "model.txt", run_dir / "model_summary.yaml", run_dir / "splits", run_dir / "metrics")
+    logger.info(
+        "run_artifacts config=%s model=%s summary=%s splits=%s metrics=%s",
+        run_dir / "config.yaml",
+        run_dir / "model.txt",
+        run_dir / "model_summary.yaml",
+        run_dir / "splits",
+        run_dir / "metrics",
+    )
 
 
 if __name__ == "__main__":
