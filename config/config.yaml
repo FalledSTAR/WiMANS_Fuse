@@ -7,7 +7,7 @@ data:
   root: ../dataset
   annotation: ../dataset/annotation.csv
   wifi_band: ["5"]
-  environment: null
+  environment: ["classroom"]
   num_users: ["1"]
   user_mode: single
   label_mode: single_ce
@@ -46,7 +46,7 @@ cafd:
   lambda_cafd: 0.1
 
 train:
-  epochs: 10
+  epochs: 30
   batch_size: 8
   num_workers: 0
   log_interval: 50
@@ -56,6 +56,10 @@ train:
   weight_decay: 1.0e-4
   amp: false
   device: auto
+  scheduler:
+    factor: 0.5      # multiply LR by this when plateau detected
+    patience: 5      # epochs with no val_acc improvement before reducing
+    min_lr: 1.0e-7   # floor for all param group LRs
 
 test:
   checkpoint: null
