@@ -37,6 +37,7 @@ def parse_args():
     parser.add_argument("--num-frames", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--grad-accum-steps", type=int, default=None)
     parser.add_argument("--freeze-backbone", action="store_true")
     parser.add_argument("--no-flops", action="store_true")
     return parser.parse_args()
@@ -61,6 +62,8 @@ def apply_overrides(cfg, args):
         cfg["train"]["epochs"] = args.epochs
     if args.batch_size is not None:
         cfg["train"]["batch_size"] = args.batch_size
+    if args.grad_accum_steps is not None:
+        cfg["train"]["gradient_accumulation_steps"] = args.grad_accum_steps
     if args.freeze_backbone:
         cfg["video_teacher"]["freeze_backbone"] = True
     if args.no_flops:
@@ -251,50 +254,70 @@ def run_epoch(model, loader, optimizer, scaler, device, cfg, epoch, logger=None,
     total_acc = 0.0
     batch_rows = []
     log_interval = max(int(cfg["train"].get("log_interval", 10)), 1)
+    accumulation_steps = max(int(cfg["train"].get("gradient_accumulation_steps", 1)), 1)
     use_amp = bool(cfg["train"].get("amp", False)) and device.type == "cuda"
     grad_clip_norm = cfg["train"].get("grad_clip_norm")
+    samples_seen = 0
+    optimizer_step = 0
+    optimizer.zero_grad(set_to_none=True)
 
     for batch_idx, batch in enumerate(loader, start=1):
         video = batch["video"].float().to(device)
         labels = batch["label"].to(device)
-        optimizer.zero_grad(set_to_none=True)
 
         with torch.autocast(device_type=device.type, enabled=use_amp):
             logits = model(video)
             loss = classification_loss(logits, labels, "single_ce")
 
-        scaler.scale(loss).backward()
-        if grad_clip_norm is not None:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
-        scaler.step(optimizer)
-        scaler.update()
+        window_start = ((batch_idx - 1) // accumulation_steps) * accumulation_steps + 1
+        window_end = min(window_start + accumulation_steps - 1, len(loader))
+        current_accumulation_steps = window_end - window_start + 1
+        scaler.scale(loss / current_accumulation_steps).backward()
+        should_step = batch_idx % accumulation_steps == 0 or batch_idx == len(loader)
+        if should_step:
+            if grad_clip_norm is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            optimizer_step += 1
 
         batch_acc = accuracy_top1(logits.detach(), labels.detach())
         total_loss += float(loss.item())
         total_acc += batch_acc
+        samples_seen += int(labels.shape[0])
         row = {
             "epoch": epoch,
             "batch": batch_idx,
-            "samples_seen": batch_idx * int(cfg["train"]["batch_size"]),
+            "samples_seen": samples_seen,
             "loss": float(loss.item()),
             "accuracy": batch_acc,
             "batch_size": int(labels.shape[0]),
+            "accumulation_step": ((batch_idx - 1) % accumulation_steps) + 1,
+            "optimizer_step": optimizer_step,
         }
         batch_rows.append(row)
 
         if logger is not None and (batch_idx == 1 or batch_idx % log_interval == 0 or batch_idx == len(loader)):
             logger.info(
-                "train epoch=%s batch=%s/%s loss=%.6f acc=%.6f",
+                "train epoch=%s batch=%s/%s loss=%.6f acc=%.6f accum=%s/%s opt_step=%s",
                 epoch,
                 batch_idx,
                 len(loader),
                 row["loss"],
                 row["accuracy"],
+                row["accumulation_step"],
+                accumulation_steps,
+                row["optimizer_step"],
             )
 
     if batch_csv_path is not None:
-        append_csv_rows(batch_csv_path, batch_rows, ["epoch", "batch", "samples_seen", "loss", "accuracy", "batch_size"])
+        append_csv_rows(
+            batch_csv_path,
+            batch_rows,
+            ["epoch", "batch", "samples_seen", "loss", "accuracy", "batch_size", "accumulation_step", "optimizer_step"],
+        )
 
     return total_loss / max(len(loader), 1), total_acc / max(len(loader), 1)
 
@@ -334,6 +357,12 @@ def main():
     train_df.to_csv(run_dir / "splits" / "train.csv", index=False, encoding="utf-8-sig")
     val_df.to_csv(run_dir / "splits" / "val.csv", index=False, encoding="utf-8-sig")
     logger.info("dataset_split train=%s val=%s", len(train_df), len(val_df))
+    logger.info(
+        "video_loading=online_mp4 no_npy_preprocess micro_batch_size=%d gradient_accumulation_steps=%d effective_batch_size=%d",
+        int(cfg["train"]["batch_size"]),
+        max(int(cfg["train"].get("gradient_accumulation_steps", 1)), 1),
+        int(cfg["train"]["batch_size"]) * max(int(cfg["train"].get("gradient_accumulation_steps", 1)), 1),
+    )
 
     model = build_model(cfg)
     (run_dir / "model.txt").write_text(str(model), encoding="utf-8")

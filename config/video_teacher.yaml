@@ -29,7 +29,10 @@ video_teacher:
 
 train:
   epochs: 50
-  batch_size: 8
+  # S3D with 90 frames can exceed 16 GB VRAM at batch_size=8.
+  # Keep online mp4 loading, use micro-batch 2 and accumulate 4 steps for effective batch 8.
+  batch_size: 2
+  gradient_accumulation_steps: 4
   num_workers: 0
   log_interval: 10
   lr_backbone: 1.0e-5
