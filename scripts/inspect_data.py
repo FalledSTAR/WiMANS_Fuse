@@ -8,6 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from datasets.constants import ACTIVITY_COLS  # noqa: E402
+from datasets import build_single_user_dataframe  # noqa: E402
 from datasets.label_builder import build_single_user_label  # noqa: E402
 from utils.config import load_config, resolve_path  # noqa: E402
 
@@ -29,13 +30,17 @@ def main():
     if len(dataframe) != 11286:
         raise AssertionError(f"Expected 11286 annotation rows, got {len(dataframe)}")
 
-    selected = dataframe[
-        dataframe["wifi_band"].isin([str(item) for item in cfg["data"]["wifi_band"]])
-        & dataframe["number_of_users"].isin([str(item) for item in cfg["data"]["num_users"]])
-    ].copy()
+    selected = build_single_user_dataframe(
+        annotation,
+        wifi_band=cfg["data"]["wifi_band"],
+        environment=cfg["data"]["environment"],
+        num_users=cfg["data"]["num_users"],
+        sample_limit=cfg["data"]["sample_limit"],
+    )
+    print(f"filters wifi_band={cfg['data']['wifi_band']} environment={cfg['data']['environment']} num_users={cfg['data']['num_users']}")
     print(f"selected_rows={len(selected)}")
-    if len(selected) != 1782:
-        raise AssertionError(f"Expected 1782 5GHz single-user rows, got {len(selected)}")
+    if len(selected) == 0:
+        raise AssertionError("Selected data is empty")
 
     non_null_counts = selected[ACTIVITY_COLS].notna().sum(axis=1)
     if not (non_null_counts == 1).all():
@@ -44,8 +49,10 @@ def main():
     labels = selected.apply(build_single_user_label, axis=1)
     class_counts = labels.value_counts().sort_index().to_dict()
     print(f"class_counts={class_counts}")
-    if sorted(class_counts.values()) != [198] * 9:
-        raise AssertionError(f"Expected 198 samples per class, got {class_counts}")
+    if len(class_counts) != 9:
+        raise AssertionError(f"Expected 9 activity classes, got {class_counts}")
+    if cfg["data"]["sample_limit"] is None and len(set(class_counts.values())) != 1:
+        raise AssertionError(f"Expected balanced classes for the selected split, got {class_counts}")
 
     missing_wifi = []
     missing_video = []
