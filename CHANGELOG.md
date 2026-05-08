@@ -128,6 +128,53 @@ recorded here before moving the project to the 4080S machine.
     - `test_loss=3.680732 test_acc=0.131653`
     - `output/wimans_5g_single_baseline/v0/20260506_103030/splits/test_predictions.csv`
 
+## v0.1.4 - 2026-05-08
+
+- Code and validation commit: `3095948`
+- Changes:
+  - Fixed `scripts/inspect_data.py` so data inspection uses the same `wifi_band`, `environment`, `num_users`, and `sample_limit` filters as training.
+  - Replaced hard-coded selected-row and class-count assertions with config-aware checks.
+- Problems found:
+  - The previous data inspection script ignored `data.environment`, so `environment: ["classroom"]` configs still reported the full 5 GHz single-user set of `1782` rows instead of the classroom subset.
+- Validation commands:
+  - `python -m compileall .\WiMANS_Baseline\scripts\inspect_data.py`
+  - `python scripts\inspect_data.py --config config\config.yaml`
+  - `python scripts\inspect_data.py --config output\wimans_5g_single_baseline\v1\20260507_093957\config.yaml`
+- Validation result:
+  - Static compile passed.
+  - Current classroom config:
+    - `selected_rows=594`
+    - class counts are `66` per activity.
+    - `missing_wifi=0`, `missing_video=0`
+  - Historical environment-null config:
+    - `selected_rows=1782`
+    - class counts are `198` per activity.
+    - `missing_wifi=0`, `missing_video=0`
+
+## v0.1.5 - 2026-05-08
+
+- Code and validation commit: `cec77d8`
+- Changes:
+  - Added `train_video_teacher.py` for training a video-only teacher on the current 5 GHz single-user HAR task.
+  - Added `config/video_teacher.yaml` with seed `39`, `batch_size: 8`, online video reading, and S3D default backbone.
+  - Added selectable WiMANS-style video model names through `--model` / `--backbone`: `S3D`, `ResNet`, `MViT-v1`, `MViT-v2`, `Swin-T`, and `Swin-S`.
+  - Added `models/video_teacher.py` with torchvision video backbone wrapping, 9-class head replacement, optional backbone freezing, and feature extraction support for later distillation.
+  - Updated the dataset video path so video-only training can skip WiFi loading while still saving run config, splits, metrics, predictions, model structure, parameter count, and checkpoint artifacts.
+- Problems found:
+  - S3D cannot run the tiny smoke test with only 8 frames after temporal downsampling; use at least `--num-frames 16` for smoke tests. Full training keeps `video.num_frames: 90`.
+  - Real pretrained video weights use `weights: kinetics400`; if the 4080S machine has no cached weights, it must be able to download them or receive the cache/weights in advance.
+- Validation commands:
+  - `python -m compileall .\models\video_teacher.py .\models\__init__.py .\datasets\video_loader.py .\datasets\wimans_dataset.py .\train_video_teacher.py`
+  - `python train_video_teacher.py --config config\video_teacher.yaml --model S3D --weights none --sample-limit 4 --num-frames 16 --epochs 1 --batch-size 2 --no-flops`
+- Validation result:
+  - Static compile passed in the `WiMANS` conda environment.
+  - Video teacher smoke test completed on the local GPU:
+    - Run directory: `output/wimans_5g_single_video_teacher/video_teacher/20260508_190419`
+    - `train=3`, `val=1`
+    - `epoch=1 train_loss=2.389160 train_acc=0.000000 val_loss=2.195125 val_acc=0.000000`
+    - Model parameters: `7,919,273`
+    - Saved `splits/val_predictions_epoch_001.csv`, `splits/val_predictions_best.csv`, and `checkpoints/best.pt`.
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.

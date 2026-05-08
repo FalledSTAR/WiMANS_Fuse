@@ -198,10 +198,10 @@ def build_scheduler(optimizer, cfg, logger=None) -> torch.optim.lr_scheduler.Red
 
 
 def get_current_lrs(optimizer) -> dict:
-    """Return current LR for each named param group as a dict."""
+    """Return a dict mapping param-group names (str) to current LR values (float)."""
     lrs = {}
-    for group in optimizer.param_groups:
-        name = group.get("name", f"group_{optimizer.param_groups.index(group)}")
+    for idx, group in enumerate(optimizer.param_groups):
+        name = group.get("name", f"group_{idx}")
         lrs[name] = group["lr"]
     return lrs
 

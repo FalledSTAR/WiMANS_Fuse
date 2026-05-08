@@ -60,22 +60,25 @@ class WiMANSHARDataset(Dataset):
         dataframe: pd.DataFrame,
         data_root: str,
         label_mode: str = "single_ce",
+        use_wifi: bool = True,
         use_video: bool = False,
         target_len: int = 3000,
         pad_mode: str = "left",
         truncate_mode: str = "tail",
         normalize: str = "log1p_zscore",
         video_num_frames: int = 90,
+        video_transform=None,
     ):
         self.dataframe = dataframe.reset_index(drop=True)
         self.data_root = Path(data_root)
         self.label_mode = label_mode
+        self.use_wifi = use_wifi
         self.use_video = use_video
         self.target_len = target_len
         self.pad_mode = pad_mode
         self.truncate_mode = truncate_mode
         self.normalize = normalize
-        self.video_loader = OnlineS3DVideoLoader(num_frames=video_num_frames) if use_video else None
+        self.video_loader = OnlineS3DVideoLoader(num_frames=video_num_frames, transform=video_transform) if use_video else None
 
     def __len__(self):
         return len(self.dataframe)
@@ -92,14 +95,16 @@ class WiMANSHARDataset(Dataset):
 
         item = {
             "sample_id": sample_label,
-            "wifi": load_wifi_amplitude(
+        }
+
+        if self.use_wifi:
+            item["wifi"] = load_wifi_amplitude(
                 str(wifi_path),
                 target_len=self.target_len,
                 pad_mode=self.pad_mode,
                 truncate_mode=self.truncate_mode,
                 normalize=self.normalize,
-            ),
-        }
+            )
 
         if self.label_mode == "single_ce":
             item["label"] = build_single_user_label(row)
