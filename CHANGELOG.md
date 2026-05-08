@@ -128,6 +128,29 @@ recorded here before moving the project to the 4080S machine.
     - `test_loss=3.680732 test_acc=0.131653`
     - `output/wimans_5g_single_baseline/v0/20260506_103030/splits/test_predictions.csv`
 
+## v0.1.4 - 2026-05-08
+
+- Code and validation commit: `3095948`
+- Changes:
+  - Fixed `scripts/inspect_data.py` so data inspection uses the same `wifi_band`, `environment`, `num_users`, and `sample_limit` filters as training.
+  - Replaced hard-coded selected-row and class-count assertions with config-aware checks.
+- Problems found:
+  - The previous data inspection script ignored `data.environment`, so `environment: ["classroom"]` configs still reported the full 5 GHz single-user set of `1782` rows instead of the classroom subset.
+- Validation commands:
+  - `python -m compileall .\WiMANS_Baseline\scripts\inspect_data.py`
+  - `python scripts\inspect_data.py --config config\config.yaml`
+  - `python scripts\inspect_data.py --config output\wimans_5g_single_baseline\v1\20260507_093957\config.yaml`
+- Validation result:
+  - Static compile passed.
+  - Current classroom config:
+    - `selected_rows=594`
+    - class counts are `66` per activity.
+    - `missing_wifi=0`, `missing_video=0`
+  - Historical environment-null config:
+    - `selected_rows=1782`
+    - class counts are `198` per activity.
+    - `missing_wifi=0`, `missing_video=0`
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.
