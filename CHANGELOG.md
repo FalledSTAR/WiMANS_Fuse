@@ -175,6 +175,25 @@ recorded here before moving the project to the 4080S machine.
     - Model parameters: `7,919,273`
     - Saved `splits/val_predictions_epoch_001.csv`, `splits/val_predictions_best.csv`, and `checkpoints/best.pt`.
 
+## v0.1.6 - 2026-05-08
+
+- Code commit: `1736df7`
+- Changes:
+  - Kept video teacher data loading as online mp4 reading; no WiMANS-style video `.npy` preprocessing is introduced.
+  - Added `train.gradient_accumulation_steps` and CLI override `--grad-accum-steps`.
+  - Changed `config/video_teacher.yaml` default from physical `batch_size: 8` to micro-batch `batch_size: 2` with `gradient_accumulation_steps: 4`, preserving effective batch size `8`.
+  - Added log output for `video_loading=online_mp4`, micro-batch size, accumulation steps, and effective batch size.
+  - Updated README commands for 16 GB friendly video teacher training.
+- Problems found:
+  - Training the video teacher is memory heavier than using it as a frozen teacher in V1, because unfrozen S3D must store 3D convolution activations for backpropagation.
+  - `batch_size: 8` with S3D, 90 frames, 224 resolution, and full teacher backpropagation can exceed 16 GB VRAM.
+- Validation commands:
+  - `python -m compileall .\train_video_teacher.py`
+  - No training smoke test was run after this change by request; runtime validation will be performed on the 4080S machine.
+- Validation result:
+  - Static compile passed before committing the change.
+  - 4080S training result is pending.
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.
