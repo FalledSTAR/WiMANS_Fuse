@@ -16,7 +16,9 @@ from models import VideoWiFiCAFDModel, XFiWiFiStudent  # noqa: E402
 from utils import (  # noqa: E402
     accuracy_top1,
     append_csv_rows,
+    build_epoch_result,
     build_model_summary,
+    build_wimans_result_payload,
     create_run_dir,
     load_config,
     resolve_path,
@@ -24,6 +26,8 @@ from utils import (  # noqa: E402
     save_yaml,
     seed_everything,
     setup_run_logger,
+    update_result_payload,
+    write_result_json,
 )
 
 
@@ -393,6 +397,15 @@ def main():
     logger.info("model_summary:\n%s", yaml.safe_dump(model_summary, allow_unicode=True, sort_keys=False))
     model = model.to(device)
 
+    class_names = [ID_TO_ACTIVITY[class_id] for class_id in sorted(ID_TO_ACTIVITY)]
+    result_payload = build_wimans_result_payload(
+        model_name="xfi_resnet18" if args.stage == "v0" else "xfi_resnet18_with_s3d_cafd",
+        task=f"{args.stage}_single_person_har",
+        cfg=cfg,
+        model_summary=model_summary,
+    )
+    epoch_results = []
+
     optimizer = build_optimizer(model, cfg, args.stage, logger=logger)
     scheduler = build_scheduler(optimizer, cfg, logger=logger)
 
@@ -478,6 +491,19 @@ def main():
             [epoch_rows[-1]],
             epoch_csv_fieldnames,
         )
+        epoch_results.append(
+            build_epoch_result(
+                epoch + 1,
+                train_loss,
+                train_acc,
+                val_loss,
+                val_acc,
+                prediction_rows,
+                class_names,
+                split_df=val_df,
+                lrs=new_lrs,
+            )
+        )
 
         if val_acc > best_acc:
             best_acc = val_acc
@@ -493,6 +519,9 @@ def main():
                 append_csv_rows(best_prediction_path, prediction_rows, prediction_fieldnames)
                 logger.info("saved_best_val_predictions=%s", best_prediction_path)
             logger.info("saved_best_checkpoint=%s val_acc=%.6f", checkpoint_dir / "best.pt", best_acc)
+
+        update_result_payload(result_payload, epoch_results)
+        write_result_json(run_dir / "result.json", result_payload)
 
     logger.info("training_finished best_acc=%.6f", best_acc)
     logger.info(

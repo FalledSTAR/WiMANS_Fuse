@@ -193,9 +193,9 @@ folder and keep this path stable:
 ```
 
 `config/config.yaml` uses that path by default through `video.teacher_checkpoint`.
-Video-teacher training also keeps the top 3 validation checkpoints; filenames include
-epoch, validation accuracy, and validation loss, with `top_k_checkpoints.csv` recording
-their ranking.
+Video-teacher training also keeps the top 3 validation checkpoint weight files.
+Filenames include epoch, validation accuracy, and validation loss, with
+`top_k_checkpoints.csv` recording their ranking.
 
 Use that checkpoint later as the visual teacher branch for the first distillation
 experiment. Keep `--weights none` only for smoke tests; real teacher training should
@@ -247,6 +247,7 @@ config.yaml                 # effective config after CLI overrides
 train.log                   # config, split paths, model structure, params/FLOPs, training details
 model.txt                   # full model structure
 model_summary.yaml          # parameter counts and MAC/FLOP estimates
+result.json                 # WiMANS-style metrics plus per-epoch/per-class/per-scene details
 splits/train.csv            # saved training split
 splits/val.csv              # saved validation split
 splits/val_predictions_*.csv # validation prediction-vs-ground-truth files
@@ -254,6 +255,7 @@ splits/test_predictions.csv # test.py prediction-vs-ground-truth file
 metrics/train_batches.csv   # per-batch training loss/accuracy details
 metrics/epochs.csv          # per-epoch train/validation summary
 checkpoints/best.pt         # best validation checkpoint
+checkpoints/epoch_*_acc_*_loss_*.pt # top-3 video teacher checkpoint weights
 checkpoints/top_k_checkpoints.csv # top checkpoint ranking for video teacher runs
 ```
 

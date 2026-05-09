@@ -17,6 +17,8 @@ from models.video_teacher import VideoTeacherClassifier, build_video_transform, 
 from utils import (  # noqa: E402
     accuracy_top1,
     append_csv_rows,
+    build_epoch_result,
+    build_wimans_result_payload,
     count_parameters,
     create_run_dir,
     load_config,
@@ -25,6 +27,8 @@ from utils import (  # noqa: E402
     save_yaml,
     seed_everything,
     setup_run_logger,
+    update_result_payload,
+    write_result_json,
 )
 
 
@@ -409,6 +413,15 @@ def main():
     logger.info("model_summary:\n%s", yaml.safe_dump(summary, allow_unicode=True, sort_keys=False))
     model = model.to(device)
 
+    class_names = [ID_TO_ACTIVITY[class_id] for class_id in sorted(ID_TO_ACTIVITY)]
+    result_payload = build_wimans_result_payload(
+        model_name=normalize_video_backbone_name(cfg["video_teacher"]["backbone"]),
+        task="single_person_video_teacher",
+        cfg=cfg,
+        model_summary=summary,
+    )
+    epoch_results = []
+
     optimizer = build_optimizer(model, cfg, logger=logger)
     scheduler = build_scheduler(optimizer, cfg, logger=logger)
     use_amp = bool(cfg["train"].get("amp", False)) and device.type == "cuda"
@@ -464,6 +477,19 @@ def main():
             "lr_head": lrs_after.get("head", float("nan")),
         }
         append_csv_rows(run_dir / "metrics" / "epochs.csv", [epoch_row], epoch_fieldnames)
+        epoch_results.append(
+            build_epoch_result(
+                epoch,
+                train_loss,
+                train_acc,
+                val_loss,
+                val_acc,
+                prediction_rows,
+                class_names,
+                split_df=val_df,
+                lrs=lrs_after,
+            )
+        )
 
         candidate = {
             "epoch": epoch,
@@ -550,6 +576,9 @@ def main():
                     val_acc,
                     val_loss,
                 )
+
+        update_result_payload(result_payload, epoch_results, top_checkpoints=top_checkpoints)
+        write_result_json(run_dir / "result.json", result_payload)
 
     logger.info("training_finished best_acc=%.6f", best_acc)
     logger.info(
