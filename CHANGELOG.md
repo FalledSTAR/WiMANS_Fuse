@@ -236,6 +236,33 @@ recorded here before moving the project to the 4080S machine.
 - Validation result:
   - Static compile passed.
 
+## v0.1.9 - 2026-05-09
+
+- Code commit: `5db4864`
+- Changes:
+  - Added V1 video-logit distillation on top of the existing CE + CAFD route.
+  - Added `losses/logits_kd_loss.py` with temperature-scaled KL divergence and optional teacher-confidence filtering.
+  - Updated frozen `S3DTeacher` so the trained 9-class video classifier head is loaded from `../backbone_models/video/video_s3d.pt` instead of being skipped.
+  - Updated V1 forward outputs to include both `video_feature` and `teacher_logits`.
+  - Added `logits_kd` config with default `temperature: 4.0` and `lambda_logits: 0.5`.
+  - Added CLI overrides for fast 4080S ablations: `--lambda-cafd`, `--lambda-logits`, and `--kd-temperature`.
+  - Added V1 teacher prediction fields to validation prediction CSVs and `teacher_accuracy` / `logits_kd_loss` to per-batch logs.
+  - Added `logits_kd` settings to the WiMANS-style `result.json` payload for new runs.
+- Problems found:
+  - Copied CAFD-only V1 run `20260509_103545` with `batch_size=8` reached best `val_acc=0.361667` at epoch 15, still far below the expected single-person HAR target.
+  - Copied CAFD-only V1 run `20260509_195416` with `batch_size=16` reached best `val_acc=0.288587` in the copied log, so simply enlarging the physical CAFD relation batch did not solve the issue.
+  - CAFD-only results still over-predict easy/broad classes such as `nothing` and `wave`; weak classes include `lie_down`, `rotation`, and `sit_down`.
+  - The trained video teacher is strong enough, so the bottleneck is more likely the WiFi student transfer signal than teacher quality.
+- Validation commands:
+  - `python -m compileall .\WiMANS_Baseline\train.py .\WiMANS_Baseline\models .\WiMANS_Baseline\losses .\WiMANS_Baseline\utils`
+  - `python -c "import sys; sys.path.insert(0,'WiMANS_Baseline'); from models.s3d_teacher import S3DTeacher; m=S3DTeacher(weights='kinetics400', freeze=True, checkpoint_path='backbone_models/video/video_s3d.pt', num_classes=9); print(m.checkpoint_extra); print(m.checkpoint_load_info); print(m.model.classifier[1].out_channels)"`
+  - `python -c "import sys, torch; sys.path.insert(0,'WiMANS_Baseline'); from models.s3d_teacher import S3DTeacher; m=S3DTeacher(weights='kinetics400', freeze=True, checkpoint_path='backbone_models/video/video_s3d.pt', num_classes=9).eval(); x=torch.randn(1,3,16,224,224); y=m(x, return_logits=True); print(tuple(y['feature'].shape), tuple(y['logits'].shape), torch.isfinite(y['logits']).all().item())"`
+- Validation result:
+  - Static compile passed.
+  - Trained video teacher checkpoint loaded with `missing_keys=[]`, `unexpected_keys=[]`, `loaded_keys=464`, and classifier output channels `9`.
+  - S3D teacher forward check returned feature shape `(1, 1024)`, logits shape `(1, 9)`, and finite logits.
+  - Full V1b training is pending on the 4080S.
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.
