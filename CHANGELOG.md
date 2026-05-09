@@ -219,6 +219,23 @@ recorded here before moving the project to the 4080S machine.
     - load info: `loaded_keys=462`, `unexpected_keys=[]`
     - missing keys are only `classifier.1.weight` and `classifier.1.bias`, which is expected for feature-only teacher loading.
 
+## v0.1.8 - 2026-05-09
+
+- Code commit: `e53f6af`
+- Changes:
+  - Added `utils/result_report.py` to write WiMANS-style `result.json` files.
+  - Added per-epoch validation classification reports, per-class accuracy, per-environment accuracy, and learning-rate snapshots to `result.json`.
+  - Added `result.json` output to both `train_video_teacher.py` and `train.py`, so video teacher, V0, and V1 runs share a common result summary format.
+  - Clarified README text that video-teacher top-3 retention saves actual `.pt` checkpoint weight files, not only metric rows.
+  - Expanded `../WiMANS_Video_WiFi_CAFD_Implementation.md` into a detailed staged implementation plan covering teacher training, CAFD distillation, dual-teacher BLEND-style expansion, EA-KD, masked reconstruction, ablations, and diagnostics.
+- Problems found:
+  - The previous artifacts required opening several CSV files to inspect per-class and per-scene behavior; this made long experiment comparison inconvenient.
+  - The root implementation plan was too high-level for the current route after the successful trained video teacher result.
+- Validation commands:
+  - `python -m compileall .\utils\result_report.py .\utils\__init__.py .\train_video_teacher.py .\train.py`
+- Validation result:
+  - Static compile passed.
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.
