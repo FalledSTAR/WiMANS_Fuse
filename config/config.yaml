@@ -57,6 +57,10 @@ train:
   weight_decay: 1.0e-4
   amp: false
   device: auto
+  scheduler:
+    factor: 0.5      # multiply LR by this when plateau detected
+    patience: 5      # epochs with no val_acc improvement before reducing
+    min_lr: 1.0e-7   # floor for all param group LRs
 
 test:
   checkpoint: null
