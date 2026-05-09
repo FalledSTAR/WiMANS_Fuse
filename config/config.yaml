@@ -46,6 +46,12 @@ cafd:
   beta: 0.5
   lambda_cafd: 0.1
 
+logits_kd:
+  enable: true
+  temperature: 4.0
+  lambda_logits: 0.5
+  confidence_threshold: 0.0
+
 train:
   epochs: 25
   batch_size: 8

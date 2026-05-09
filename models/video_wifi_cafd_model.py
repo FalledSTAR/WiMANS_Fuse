@@ -19,7 +19,12 @@ class VideoWiFiCAFDModel(nn.Module):
     ):
         super().__init__()
         self.wifi_student = XFiWiFiStudent(weight_path=xfi_weight_path, num_classes=num_classes)
-        self.video_teacher = S3DTeacher(weights=s3d_weights, freeze=freeze_s3d, checkpoint_path=teacher_checkpoint_path)
+        self.video_teacher = S3DTeacher(
+            weights=s3d_weights,
+            freeze=freeze_s3d,
+            checkpoint_path=teacher_checkpoint_path,
+            num_classes=num_classes,
+        )
         self.wifi_projector = HybridProjector(
             in_dim=self.wifi_student.feature_dim,
             hidden_dim=projector_hidden_dim,
@@ -35,11 +40,13 @@ class VideoWiFiCAFDModel(nn.Module):
 
     def forward(self, wifi, video):
         wifi_out = self.wifi_student(wifi, return_features=True)
-        video_feature = self.video_teacher(video)
+        video_out = self.video_teacher(video, return_logits=True)
+        video_feature = video_out["feature"]
         wifi_projected = self.wifi_projector(wifi_out["tokens"])
         video_projected = self.video_projector(video_feature)
         return {
             "logits": wifi_out["logits"],
+            "teacher_logits": video_out["logits"],
             "wifi_feature": wifi_out["feature"],
             "video_feature": video_feature,
             "wifi_projected": wifi_projected,
