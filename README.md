@@ -43,7 +43,8 @@ Default paths in `config/config.yaml` are relative to this project directory:
 ```text
 ../dataset
 ../dataset/annotation.csv
-../backbone_models/wifi_ResNet18.pt
+../backbone_models/WiFi/wifi_ResNet18.pt
+../backbone_models/video/video_s3d.pt
 ```
 
 The official reference folders remain outside git:
@@ -148,16 +149,16 @@ micro-batch:
 
 ```yaml
 train:
-  batch_size: 2
+  batch_size: 4
   gradient_accumulation_steps: 4
 ```
 
-This gives an effective batch size of `8` without storing all eight videos'
+This gives an effective batch size of `16` without storing all sixteen videos'
 backpropagation activations in GPU memory at once. If the 4080S still runs out of
 memory, use:
 
 ```powershell
-python train_video_teacher.py --config config\video_teacher.yaml --model S3D --batch-size 1 --grad-accum-steps 8
+python train_video_teacher.py --config config\video_teacher.yaml --model S3D --batch-size 2 --grad-accum-steps 8
 ```
 
 The video teacher follows the official WiMANS-style model switch. Supported names:
@@ -183,6 +184,18 @@ The trained teacher checkpoint is saved under:
 ```text
 output/wimans_5g_single_video_teacher/video_teacher/<RUN_ID>/checkpoints/best.pt
 ```
+
+For distillation, copy the selected teacher checkpoint into the external backbone
+folder and keep this path stable:
+
+```text
+../backbone_models/video/video_s3d.pt
+```
+
+`config/config.yaml` uses that path by default through `video.teacher_checkpoint`.
+Video-teacher training also keeps the top 3 validation checkpoints; filenames include
+epoch, validation accuracy, and validation loss, with `top_k_checkpoints.csv` recording
+their ranking.
 
 Use that checkpoint later as the visual teacher branch for the first distillation
 experiment. Keep `--weights none` only for smoke tests; real teacher training should
@@ -241,6 +254,7 @@ splits/test_predictions.csv # test.py prediction-vs-ground-truth file
 metrics/train_batches.csv   # per-batch training loss/accuracy details
 metrics/epochs.csv          # per-epoch train/validation summary
 checkpoints/best.pt         # best validation checkpoint
+checkpoints/top_k_checkpoints.csv # top checkpoint ranking for video teacher runs
 ```
 
 Current 3050 validation run:
@@ -261,7 +275,8 @@ Then copy or mount the external resources so the config paths resolve:
 
 ```text
 dataset/
-backbone_models/wifi_ResNet18.pt
+backbone_models/WiFi/wifi_ResNet18.pt
+backbone_models/video/video_s3d.pt
 ```
 
 On the 4080S machine, update these config fields first:

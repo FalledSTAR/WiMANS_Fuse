@@ -34,6 +34,7 @@ def parse_args():
     parser.add_argument("--sample-limit", type=int, default=None)
     parser.add_argument("--num-frames", type=int, default=None)
     parser.add_argument("--s3d-weights", default=None)
+    parser.add_argument("--teacher-checkpoint", default=None)
     return parser.parse_args()
 
 
@@ -97,10 +98,13 @@ def build_model(cfg, stage: str):
     if stage == "v0":
         return XFiWiFiStudent(weight_path=weight_path, num_classes=cfg["model"]["num_classes"])
 
+    teacher_checkpoint = cfg["video"].get("teacher_checkpoint")
+    teacher_checkpoint_path = resolve_path(PROJECT_ROOT, teacher_checkpoint) if teacher_checkpoint else None
     return VideoWiFiCAFDModel(
         xfi_weight_path=weight_path,
         num_classes=cfg["model"]["num_classes"],
         s3d_weights=cfg["video"]["s3d_weights"],
+        teacher_checkpoint_path=teacher_checkpoint_path,
         freeze_s3d=cfg["video"]["freeze_s3d"],
         projector_hidden_dim=cfg["projector"]["hidden_dim"],
         projector_out_dim=cfg["projector"]["out_dim"],
@@ -348,6 +352,8 @@ def main():
         cfg["video"]["num_frames"] = args.num_frames
     if args.s3d_weights is not None:
         cfg["video"]["s3d_weights"] = args.s3d_weights
+    if args.teacher_checkpoint is not None:
+        cfg["video"]["teacher_checkpoint"] = args.teacher_checkpoint
     seed_everything(int(cfg["experiment"]["seed"]))
     device = select_device(cfg["train"]["device"])
 
@@ -372,6 +378,10 @@ def main():
     logger.info("saved_val_split=%s", run_dir / "splits" / "val.csv")
 
     model = build_model(cfg, args.stage)
+    if args.stage == "v1" and getattr(model.video_teacher, "checkpoint_path", None):
+        logger.info("loaded_video_teacher_checkpoint=%s", model.video_teacher.checkpoint_path)
+        logger.info("video_teacher_checkpoint_extra=%s", model.video_teacher.checkpoint_extra)
+        logger.info("video_teacher_checkpoint_load_info=%s", model.video_teacher.checkpoint_load_info)
     model_text = str(model)
     (run_dir / "model.txt").write_text(model_text, encoding="utf-8")
     logger.info("model_structure:\n%s", model_text)

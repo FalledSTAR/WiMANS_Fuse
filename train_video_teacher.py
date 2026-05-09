@@ -38,6 +38,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--grad-accum-steps", type=int, default=None)
+    parser.add_argument("--keep-top-k", type=int, default=None)
     parser.add_argument("--freeze-backbone", action="store_true")
     parser.add_argument("--no-flops", action="store_true")
     return parser.parse_args()
@@ -64,6 +65,8 @@ def apply_overrides(cfg, args):
         cfg["train"]["batch_size"] = args.batch_size
     if args.grad_accum_steps is not None:
         cfg["train"]["gradient_accumulation_steps"] = args.grad_accum_steps
+    if args.keep_top_k is not None:
+        cfg["train"]["keep_top_k"] = args.keep_top_k
     if args.freeze_backbone:
         cfg["video_teacher"]["freeze_backbone"] = True
     if args.no_flops:
@@ -174,6 +177,40 @@ def build_scheduler(optimizer, cfg, logger=None):
 
 def current_lrs(optimizer):
     return {group.get("name", f"group_{idx}"): group["lr"] for idx, group in enumerate(optimizer.param_groups)}
+
+
+def checkpoint_rank_key(item):
+    return (-float(item["val_acc"]), float(item["val_loss"]), -int(item["epoch"]))
+
+
+def checkpoint_filename(epoch: int, val_acc: float, val_loss: float) -> str:
+    return f"epoch_{epoch:03d}_acc_{val_acc:.6f}_loss_{val_loss:.6f}.pt"
+
+
+def prediction_filename(epoch: int, val_acc: float, val_loss: float) -> str:
+    return f"val_predictions_epoch_{epoch:03d}_acc_{val_acc:.6f}_loss_{val_loss:.6f}.csv"
+
+
+def write_top_checkpoint_manifest(checkpoint_dir: Path, top_checkpoints):
+    manifest_path = checkpoint_dir / "top_k_checkpoints.csv"
+    manifest_path.unlink(missing_ok=True)
+    rows = []
+    for rank, item in enumerate(sorted(top_checkpoints, key=checkpoint_rank_key), start=1):
+        rows.append(
+            {
+                "rank": rank,
+                "epoch": item["epoch"],
+                "val_acc": item["val_acc"],
+                "val_loss": item["val_loss"],
+                "checkpoint": item["checkpoint"].name,
+                "predictions": item["predictions"].name if item.get("predictions") is not None else "",
+            }
+        )
+    append_csv_rows(
+        manifest_path,
+        rows,
+        ["rank", "epoch", "val_acc", "val_loss", "checkpoint", "predictions"],
+    )
 
 
 def build_video_model_summary(model, cfg):
@@ -378,6 +415,9 @@ def main():
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     best_acc = -1.0
+    keep_top_k = max(int(cfg["train"].get("keep_top_k", 3)), 1)
+    top_checkpoints = []
+    best_checkpoint_path = None
     epoch_fieldnames = ["epoch", "train_loss", "train_acc", "val_loss", "val_acc", "best_acc", "lr_backbone", "lr_head"]
     for epoch in range(1, int(cfg["train"]["epochs"]) + 1):
         lrs_before = current_lrs(optimizer)
@@ -425,27 +465,91 @@ def main():
         }
         append_csv_rows(run_dir / "metrics" / "epochs.csv", [epoch_row], epoch_fieldnames)
 
-        if val_acc > best_acc:
-            best_acc = val_acc
+        candidate = {
+            "epoch": epoch,
+            "val_acc": float(val_acc),
+            "val_loss": float(val_loss),
+        }
+        sorted_top = sorted(top_checkpoints, key=checkpoint_rank_key)
+        should_save_top = len(sorted_top) < keep_top_k or checkpoint_rank_key(candidate) < checkpoint_rank_key(sorted_top[-1])
+        best_acc = max(best_acc, val_acc)
+
+        if should_save_top:
+            checkpoint_path = run_dir / "checkpoints" / checkpoint_filename(epoch, val_acc, val_loss)
+            top_prediction_path = None
+            if prediction_rows:
+                top_prediction_path = run_dir / "splits" / prediction_filename(epoch, val_acc, val_loss)
+                top_prediction_path.unlink(missing_ok=True)
+                append_csv_rows(top_prediction_path, prediction_rows, list(prediction_rows[0].keys()))
+
             save_checkpoint(
-                str(run_dir / "checkpoints" / "best.pt"),
+                str(checkpoint_path),
                 model,
                 optimizer,
                 extra={
                     "epoch": epoch,
-                    "val_acc": best_acc,
+                    "val_acc": float(val_acc),
+                    "val_loss": float(val_loss),
                     "model_type": "video_teacher",
                     "backbone": normalize_video_backbone_name(cfg["video_teacher"]["backbone"]),
                     "feature_dim": model.feature_dim,
                     "num_classes": int(cfg["video_teacher"]["num_classes"]),
                 },
             )
-            if prediction_rows:
-                best_prediction_path = run_dir / "splits" / "val_predictions_best.csv"
-                best_prediction_path.unlink(missing_ok=True)
-                append_csv_rows(best_prediction_path, prediction_rows, list(prediction_rows[0].keys()))
-                logger.info("saved_best_val_predictions=%s", best_prediction_path)
-            logger.info("saved_best_checkpoint=%s val_acc=%.6f", run_dir / "checkpoints" / "best.pt", best_acc)
+            candidate["checkpoint"] = checkpoint_path
+            candidate["predictions"] = top_prediction_path
+            top_checkpoints.append(candidate)
+            top_checkpoints = sorted(top_checkpoints, key=checkpoint_rank_key)
+
+            removed_checkpoints = top_checkpoints[keep_top_k:]
+            top_checkpoints = top_checkpoints[:keep_top_k]
+            for removed in removed_checkpoints:
+                removed["checkpoint"].unlink(missing_ok=True)
+                if removed.get("predictions") is not None:
+                    removed["predictions"].unlink(missing_ok=True)
+                logger.info(
+                    "removed_checkpoint_outside_top_k=%s val_acc=%.6f val_loss=%.6f",
+                    removed["checkpoint"],
+                    removed["val_acc"],
+                    removed["val_loss"],
+                )
+
+            write_top_checkpoint_manifest(run_dir / "checkpoints", top_checkpoints)
+            logger.info(
+                "saved_top_checkpoint=%s val_acc=%.6f val_loss=%.6f keep_top_k=%d",
+                checkpoint_path,
+                val_acc,
+                val_loss,
+                keep_top_k,
+            )
+
+            if top_checkpoints[0]["checkpoint"] == checkpoint_path and best_checkpoint_path != checkpoint_path:
+                best_checkpoint_path = checkpoint_path
+                save_checkpoint(
+                    str(run_dir / "checkpoints" / "best.pt"),
+                    model,
+                    optimizer,
+                    extra={
+                        "epoch": epoch,
+                        "val_acc": float(val_acc),
+                        "val_loss": float(val_loss),
+                        "model_type": "video_teacher",
+                        "backbone": normalize_video_backbone_name(cfg["video_teacher"]["backbone"]),
+                        "feature_dim": model.feature_dim,
+                        "num_classes": int(cfg["video_teacher"]["num_classes"]),
+                    },
+                )
+                if prediction_rows:
+                    best_prediction_path = run_dir / "splits" / "val_predictions_best.csv"
+                    best_prediction_path.unlink(missing_ok=True)
+                    append_csv_rows(best_prediction_path, prediction_rows, list(prediction_rows[0].keys()))
+                    logger.info("saved_best_val_predictions=%s", best_prediction_path)
+                logger.info(
+                    "saved_best_checkpoint=%s val_acc=%.6f val_loss=%.6f",
+                    run_dir / "checkpoints" / "best.pt",
+                    val_acc,
+                    val_loss,
+                )
 
     logger.info("training_finished best_acc=%.6f", best_acc)
     logger.info(
