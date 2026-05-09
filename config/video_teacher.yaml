@@ -7,7 +7,7 @@ data:
   root: ../dataset
   annotation: ../dataset/annotation.csv
   wifi_band: ["5"]
-  environment: ["classroom"]
+  environment: ["classroom", "meeting_room", "empty_room"]
   num_users: ["1"]
   label_mode: single_ce
   sample_limit: null
@@ -28,11 +28,12 @@ video_teacher:
   num_classes: 9
 
 train:
-  epochs: 50
+  epochs: 20
   # S3D with 90 frames can exceed 16 GB VRAM at batch_size=8.
-  # Keep online mp4 loading, use micro-batch 2 and accumulate 4 steps for effective batch 8.
-  batch_size: 2
+  # Keep online mp4 loading, use micro-batch 4 and accumulate 4 steps for effective batch 16.
+  batch_size: 4
   gradient_accumulation_steps: 4
+  keep_top_k: 3
   num_workers: 0
   log_interval: 10
   lr_backbone: 1.0e-5

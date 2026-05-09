@@ -194,6 +194,31 @@ recorded here before moving the project to the 4080S machine.
   - Static compile passed before committing the change.
   - 4080S training result is pending.
 
+## v0.1.7 - 2026-05-09
+
+- Code commit: `3ff8953`
+- Changes:
+  - Updated default V1 single-person scope to mixed scenes: `classroom`, `meeting_room`, and `empty_room`.
+  - Moved the trained S3D teacher checkpoint reference to the external backbone folder:
+    `../backbone_models/video/video_s3d.pt`.
+  - Corrected the X-Fi WiFi backbone path to `../backbone_models/WiFi/wifi_ResNet18.pt`.
+  - Added loading of finetuned video teacher checkpoints in V1 CAFD training.
+  - Avoided Kinetics400 download/initialization when a local teacher checkpoint is provided.
+  - Added video-teacher top-3 checkpoint retention with epoch, validation accuracy, and validation loss in filenames.
+  - Updated the implementation plan to the new route: trained video teacher first, then CAFD distillation, then dual-teacher BLEND-style branch, EA-KD, and optional WiFi masked reconstruction.
+- Problems found:
+  - The previous `best.pt` policy saved only the first epoch that reached a new best `val_acc`; when later epochs tied accuracy with lower `val_loss`, those better checkpoints were not retained.
+  - The copied three-scene video teacher run kept only one checkpoint, so top-3 historical checkpoints cannot be reconstructed from logs alone.
+- Validation commands:
+  - `python -m compileall .\train_video_teacher.py .\train.py .\models\s3d_teacher.py .\models\video_wifi_cafd_model.py`
+  - `python -c "from pathlib import Path; from models.s3d_teacher import S3DTeacher; m=S3DTeacher(weights='kinetics400', freeze=True, checkpoint_path=str(Path('..')/'backbone_models'/'video'/'video_s3d.pt')); print(m.checkpoint_extra); print(m.checkpoint_load_info)"`
+- Validation result:
+  - Static compile passed.
+  - Local teacher checkpoint loaded successfully:
+    - checkpoint extra: `epoch=16`, `val_acc=0.997222`, `backbone=s3d`, `feature_dim=1024`, `num_classes=9`
+    - load info: `loaded_keys=462`, `unexpected_keys=[]`
+    - missing keys are only `classifier.1.weight` and `classifier.1.bias`, which is expected for feature-only teacher loading.
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.

@@ -11,6 +11,7 @@ class VideoWiFiCAFDModel(nn.Module):
         xfi_weight_path: str,
         num_classes: int = 9,
         s3d_weights: str = "kinetics400",
+        teacher_checkpoint_path: str = None,
         freeze_s3d: bool = True,
         projector_hidden_dim: int = 256,
         projector_out_dim: int = 256,
@@ -18,7 +19,7 @@ class VideoWiFiCAFDModel(nn.Module):
     ):
         super().__init__()
         self.wifi_student = XFiWiFiStudent(weight_path=xfi_weight_path, num_classes=num_classes)
-        self.video_teacher = S3DTeacher(weights=s3d_weights, freeze=freeze_s3d)
+        self.video_teacher = S3DTeacher(weights=s3d_weights, freeze=freeze_s3d, checkpoint_path=teacher_checkpoint_path)
         self.wifi_projector = HybridProjector(
             in_dim=self.wifi_student.feature_dim,
             hidden_dim=projector_hidden_dim,
