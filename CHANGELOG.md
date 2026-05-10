@@ -265,7 +265,7 @@ recorded here before moving the project to the 4080S machine.
 
 ## v0.1.10 - 2026-05-10
 
-- Code commit: `pending`
+- Code commit: `a4eaa91`
 - Changes:
   - Changed train/validation epoch loss and accuracy aggregation from batch-average to sample-weighted aggregation.
   - Changed best-checkpoint selection to use the corrected sample-level `val_acc` returned by validation prediction collection.
