@@ -11,12 +11,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from datasets import ID_TO_ACTIVITY, WiMANSHARDataset, build_single_user_dataframe, build_single_user_label  # noqa: E402
-from losses import CAFDLoss, classification_loss  # noqa: E402
+from losses import CAFDLoss, classification_loss, logits_kd_loss  # noqa: E402
 from models import VideoWiFiCAFDModel, XFiWiFiStudent  # noqa: E402
 from utils import (  # noqa: E402
     accuracy_top1,
     append_csv_rows,
+    build_epoch_result,
     build_model_summary,
+    build_wimans_result_payload,
     create_run_dir,
     load_config,
     resolve_path,
@@ -24,6 +26,8 @@ from utils import (  # noqa: E402
     save_yaml,
     seed_everything,
     setup_run_logger,
+    update_result_payload,
+    write_result_json,
 )
 
 
@@ -35,6 +39,9 @@ def parse_args():
     parser.add_argument("--num-frames", type=int, default=None)
     parser.add_argument("--s3d-weights", default=None)
     parser.add_argument("--teacher-checkpoint", default=None)
+    parser.add_argument("--lambda-cafd", type=float, default=None)
+    parser.add_argument("--lambda-logits", type=float, default=None)
+    parser.add_argument("--kd-temperature", type=float, default=None)
     return parser.parse_args()
 
 
@@ -76,16 +83,19 @@ def build_loaders(cfg, use_video: bool):
     }
     train_dataset = WiMANSHARDataset(train_df, **dataset_kwargs)
     val_dataset = WiMANSHARDataset(val_df, **dataset_kwargs)
+    batch_size = int(cfg["train"]["batch_size"])
+    drop_last_train = bool(use_video and len(train_dataset) > batch_size and len(train_dataset) % batch_size == 1)
     train_loader = DataLoader(
         train_dataset,
-        batch_size=int(cfg["train"]["batch_size"]),
+        batch_size=batch_size,
         shuffle=True,
         num_workers=int(cfg["train"]["num_workers"]),
         pin_memory=torch.cuda.is_available(),
+        drop_last=drop_last_train,
     )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=int(cfg["train"]["batch_size"]),
+        batch_size=batch_size,
         shuffle=False,
         num_workers=int(cfg["train"]["num_workers"]),
         pin_memory=torch.cuda.is_available(),
@@ -210,15 +220,30 @@ def get_current_lrs(optimizer) -> dict:
     return lrs
 
 
+def get_logits_kd_cfg(cfg) -> dict:
+    kd_cfg = cfg.get("logits_kd", {})
+    return {
+        "enabled": bool(kd_cfg.get("enable", False)) and float(kd_cfg.get("lambda_logits", 0.0)) > 0,
+        "lambda_logits": float(kd_cfg.get("lambda_logits", 0.0)),
+        "temperature": float(kd_cfg.get("temperature", 4.0)),
+        "confidence_threshold": float(kd_cfg.get("confidence_threshold", 0.0)),
+    }
+
+
 def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_loss_fn=None, logger=None, batch_csv_path=None):
     model.train()
     total_loss = 0.0
-    total_acc = 0.0
+    total_correct = 0.0
+    total_samples = 0
     batch_rows = []
     log_interval = max(int(cfg["train"].get("log_interval", 50)), 1)
+    kd_cfg = get_logits_kd_cfg(cfg)
+    samples_seen = 0
     for batch_idx, batch in enumerate(loader, start=1):
         wifi = batch["wifi"].float().to(device)
         labels = batch["label"].to(device)
+        batch_size = int(labels.shape[0])
+        samples_seen += batch_size
         optimizer.zero_grad()
 
         if stage == "v0":
@@ -226,6 +251,8 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             loss = classification_loss(logits, labels, "single_ce")
             cls_loss_value = float(loss.item())
             cafd_loss_value = None
+            logits_kd_loss_value = None
+            teacher_acc_value = None
         else:
             video = batch["video"].float().to(device)
             outputs = model(wifi, video)
@@ -233,22 +260,36 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             cls_loss = classification_loss(logits, labels, "single_ce")
             cafd_loss = cafd_loss_fn(outputs["wifi_projected"], outputs["video_projected"])
             loss = cls_loss + float(cfg["cafd"]["lambda_cafd"]) * cafd_loss
+            logits_kd_value = None
+            if kd_cfg["enabled"]:
+                logits_kd_value = logits_kd_loss(
+                    logits,
+                    outputs["teacher_logits"],
+                    temperature=kd_cfg["temperature"],
+                    confidence_threshold=kd_cfg["confidence_threshold"],
+                )
+                loss = loss + kd_cfg["lambda_logits"] * logits_kd_value
             cls_loss_value = float(cls_loss.item())
             cafd_loss_value = float(cafd_loss.item())
+            logits_kd_loss_value = None if logits_kd_value is None else float(logits_kd_value.item())
+            teacher_acc_value = accuracy_top1(outputs["teacher_logits"].detach(), labels.detach())
 
         loss.backward()
         optimizer.step()
         batch_acc = accuracy_top1(logits.detach(), labels.detach())
-        total_loss += float(loss.item())
-        total_acc += batch_acc
+        total_loss += float(loss.item()) * batch_size
+        total_correct += batch_acc * batch_size
+        total_samples += batch_size
 
         row = {
             "epoch": epoch,
             "batch": batch_idx,
-            "samples_seen": batch_idx * int(cfg["train"]["batch_size"]),
+            "samples_seen": samples_seen,
             "loss": float(loss.item()),
             "classification_loss": cls_loss_value,
             "cafd_loss": cafd_loss_value,
+            "logits_kd_loss": logits_kd_loss_value,
+            "teacher_accuracy": teacher_acc_value,
             "accuracy": batch_acc,
             "batch_size": int(labels.shape[0]),
         }
@@ -256,13 +297,15 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
 
         if logger is not None and (batch_idx == 1 or batch_idx % log_interval == 0 or batch_idx == len(loader)):
             logger.info(
-                "train epoch=%s batch=%s/%s loss=%.6f cls_loss=%.6f cafd_loss=%s acc=%.6f",
+                "train epoch=%s batch=%s/%s loss=%.6f cls_loss=%.6f cafd_loss=%s logits_kd_loss=%s teacher_acc=%s acc=%.6f",
                 epoch,
                 batch_idx,
                 len(loader),
                 row["loss"],
                 row["classification_loss"],
                 "None" if row["cafd_loss"] is None else f"{row['cafd_loss']:.6f}",
+                "None" if row["logits_kd_loss"] is None else f"{row['logits_kd_loss']:.6f}",
+                "None" if row["teacher_accuracy"] is None else f"{row['teacher_accuracy']:.6f}",
                 row["accuracy"],
             )
 
@@ -270,52 +313,79 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
         append_csv_rows(
             batch_csv_path,
             batch_rows,
-            ["epoch", "batch", "samples_seen", "loss", "classification_loss", "cafd_loss", "accuracy", "batch_size"],
+            [
+                "epoch",
+                "batch",
+                "samples_seen",
+                "loss",
+                "classification_loss",
+                "cafd_loss",
+                "logits_kd_loss",
+                "teacher_accuracy",
+                "accuracy",
+                "batch_size",
+            ],
         )
 
-    return total_loss / max(len(loader), 1), total_acc / max(len(loader), 1)
+    return total_loss / max(total_samples, 1), total_correct / max(total_samples, 1)
 
 
 @torch.no_grad()
 def evaluate(model, loader, device, stage):
     model.eval()
-    total_acc = 0.0
     total_loss = 0.0
+    total_correct = 0.0
+    total_samples = 0
     for batch in loader:
         wifi = batch["wifi"].float().to(device)
         labels = batch["label"].to(device)
+        batch_size = int(labels.shape[0])
         if stage == "v0":
             logits = model(wifi)
         else:
             video = batch["video"].float().to(device)
             logits = model(wifi, video)["logits"]
         loss = classification_loss(logits, labels, "single_ce")
-        total_loss += float(loss.item())
-        total_acc += accuracy_top1(logits, labels)
-    return total_loss / max(len(loader), 1), total_acc / max(len(loader), 1)
+        total_loss += float(loss.item()) * batch_size
+        total_correct += accuracy_top1(logits, labels) * batch_size
+        total_samples += batch_size
+    return total_loss / max(total_samples, 1), total_correct / max(total_samples, 1)
 
 
 @torch.no_grad()
 def collect_predictions(model, loader, device, stage):
     model.eval()
     rows = []
-    total_acc = 0.0
     total_loss = 0.0
+    total_correct = 0
+    total_samples = 0
     for batch in loader:
         wifi = batch["wifi"].float().to(device)
         labels = batch["label"].to(device)
+        batch_size = int(labels.shape[0])
+        teacher_logits = None
         if stage == "v0":
             logits = model(wifi)
         else:
             video = batch["video"].float().to(device)
-            logits = model(wifi, video)["logits"]
+            outputs = model(wifi, video)
+            logits = outputs["logits"]
+            teacher_logits = outputs.get("teacher_logits")
 
         loss = classification_loss(logits, labels, "single_ce")
         probs = torch.softmax(logits, dim=-1)
         pred_ids = probs.argmax(dim=-1)
         correct = pred_ids.eq(labels.long())
-        total_loss += float(loss.item())
-        total_acc += correct.float().mean().item()
+        teacher_probs = None
+        teacher_pred_ids = None
+        teacher_correct = None
+        if teacher_logits is not None:
+            teacher_probs = torch.softmax(teacher_logits, dim=-1)
+            teacher_pred_ids = teacher_probs.argmax(dim=-1)
+            teacher_correct = teacher_pred_ids.eq(labels.long())
+        total_loss += float(loss.item()) * batch_size
+        total_correct += int(correct.long().sum().item())
+        total_samples += batch_size
 
         sample_ids = batch["sample_id"]
         if isinstance(sample_ids, str):
@@ -336,11 +406,26 @@ def collect_predictions(model, loader, device, stage):
                 "true_probability": float(item_probs[true_id]),
                 "loss": float(loss.item()),
             }
+            if teacher_probs is not None:
+                teacher_pred_id = int(teacher_pred_ids[item_idx].detach().cpu().item())
+                teacher_item_probs = teacher_probs[item_idx].detach().cpu().tolist()
+                row.update(
+                    {
+                        "teacher_pred_id": teacher_pred_id,
+                        "teacher_pred_activity": ID_TO_ACTIVITY[teacher_pred_id],
+                        "teacher_correct": int(bool(teacher_correct[item_idx].detach().cpu().item())),
+                        "teacher_pred_probability": float(teacher_item_probs[teacher_pred_id]),
+                        "teacher_true_probability": float(teacher_item_probs[true_id]),
+                    }
+                )
             for class_id, class_name in ID_TO_ACTIVITY.items():
                 row[f"prob_{class_id}_{class_name}"] = float(item_probs[class_id])
+            if teacher_probs is not None:
+                for class_id, class_name in ID_TO_ACTIVITY.items():
+                    row[f"teacher_prob_{class_id}_{class_name}"] = float(teacher_item_probs[class_id])
             rows.append(row)
 
-    return total_loss / max(len(loader), 1), total_acc / max(len(loader), 1), rows
+    return total_loss / max(total_samples, 1), total_correct / max(total_samples, 1), rows
 
 
 def main():
@@ -354,6 +439,13 @@ def main():
         cfg["video"]["s3d_weights"] = args.s3d_weights
     if args.teacher_checkpoint is not None:
         cfg["video"]["teacher_checkpoint"] = args.teacher_checkpoint
+    if args.lambda_cafd is not None:
+        cfg.setdefault("cafd", {})["lambda_cafd"] = args.lambda_cafd
+    if args.lambda_logits is not None:
+        cfg.setdefault("logits_kd", {})["lambda_logits"] = args.lambda_logits
+        cfg["logits_kd"]["enable"] = args.lambda_logits > 0
+    if args.kd_temperature is not None:
+        cfg.setdefault("logits_kd", {})["temperature"] = args.kd_temperature
     seed_everything(int(cfg["experiment"]["seed"]))
     device = select_device(cfg["train"]["device"])
 
@@ -374,6 +466,13 @@ def main():
     train_df.to_csv(run_dir / "splits" / "train.csv", index=False, encoding="utf-8-sig")
     val_df.to_csv(run_dir / "splits" / "val.csv", index=False, encoding="utf-8-sig")
     logger.info("dataset_split train=%s val=%s", len(train_df), len(val_df))
+    logger.info(
+        "dataloader train_batches=%s val_batches=%s train_drop_last=%s batch_size=%s",
+        len(train_loader),
+        len(val_loader),
+        getattr(train_loader, "drop_last", False),
+        int(cfg["train"]["batch_size"]),
+    )
     logger.info("saved_train_split=%s", run_dir / "splits" / "train.csv")
     logger.info("saved_val_split=%s", run_dir / "splits" / "val.csv")
 
@@ -393,6 +492,22 @@ def main():
     logger.info("model_summary:\n%s", yaml.safe_dump(model_summary, allow_unicode=True, sort_keys=False))
     model = model.to(device)
 
+    class_names = [ID_TO_ACTIVITY[class_id] for class_id in sorted(ID_TO_ACTIVITY)]
+    kd_cfg = get_logits_kd_cfg(cfg)
+    if args.stage == "v0":
+        model_name = "xfi_resnet18"
+    elif kd_cfg["enabled"]:
+        model_name = "xfi_resnet18_with_s3d_cafd_logit_kd"
+    else:
+        model_name = "xfi_resnet18_with_s3d_cafd"
+    result_payload = build_wimans_result_payload(
+        model_name=model_name,
+        task=f"{args.stage}_single_person_har",
+        cfg=cfg,
+        model_summary=model_summary,
+    )
+    epoch_results = []
+
     optimizer = build_optimizer(model, cfg, args.stage, logger=logger)
     scheduler = build_scheduler(optimizer, cfg, logger=logger)
 
@@ -402,6 +517,13 @@ def main():
             temperature=float(cfg["cafd"]["temperature"]),
             alpha=float(cfg["cafd"]["alpha"]),
             beta=float(cfg["cafd"]["beta"]),
+        )
+        logger.info(
+            "logits_kd enabled=%s lambda=%.4f temperature=%.4f confidence_threshold=%.4f",
+            kd_cfg["enabled"],
+            kd_cfg["lambda_logits"],
+            kd_cfg["temperature"],
+            kd_cfg["confidence_threshold"],
         )
 
     best_acc = -1.0
@@ -478,6 +600,19 @@ def main():
             [epoch_rows[-1]],
             epoch_csv_fieldnames,
         )
+        epoch_results.append(
+            build_epoch_result(
+                epoch + 1,
+                train_loss,
+                train_acc,
+                val_loss,
+                val_acc,
+                prediction_rows,
+                class_names,
+                split_df=val_df,
+                lrs=new_lrs,
+            )
+        )
 
         if val_acc > best_acc:
             best_acc = val_acc
@@ -493,6 +628,9 @@ def main():
                 append_csv_rows(best_prediction_path, prediction_rows, prediction_fieldnames)
                 logger.info("saved_best_val_predictions=%s", best_prediction_path)
             logger.info("saved_best_checkpoint=%s val_acc=%.6f", checkpoint_dir / "best.pt", best_acc)
+
+        update_result_payload(result_payload, epoch_results)
+        write_result_json(run_dir / "result.json", result_payload)
 
     logger.info("training_finished best_acc=%.6f", best_acc)
     logger.info(

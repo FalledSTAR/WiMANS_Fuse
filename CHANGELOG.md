@@ -219,6 +219,73 @@ recorded here before moving the project to the 4080S machine.
     - load info: `loaded_keys=462`, `unexpected_keys=[]`
     - missing keys are only `classifier.1.weight` and `classifier.1.bias`, which is expected for feature-only teacher loading.
 
+## v0.1.8 - 2026-05-09
+
+- Code commit: `e53f6af`
+- Changes:
+  - Added `utils/result_report.py` to write WiMANS-style `result.json` files.
+  - Added per-epoch validation classification reports, per-class accuracy, per-environment accuracy, and learning-rate snapshots to `result.json`.
+  - Added `result.json` output to both `train_video_teacher.py` and `train.py`, so video teacher, V0, and V1 runs share a common result summary format.
+  - Clarified README text that video-teacher top-3 retention saves actual `.pt` checkpoint weight files, not only metric rows.
+  - Expanded `../WiMANS_Video_WiFi_CAFD_Implementation.md` into a detailed staged implementation plan covering teacher training, CAFD distillation, dual-teacher BLEND-style expansion, EA-KD, masked reconstruction, ablations, and diagnostics.
+- Problems found:
+  - The previous artifacts required opening several CSV files to inspect per-class and per-scene behavior; this made long experiment comparison inconvenient.
+  - The root implementation plan was too high-level for the current route after the successful trained video teacher result.
+- Validation commands:
+  - `python -m compileall .\utils\result_report.py .\utils\__init__.py .\train_video_teacher.py .\train.py`
+- Validation result:
+  - Static compile passed.
+
+## v0.1.9 - 2026-05-09
+
+- Code commit: `5db4864`
+- Changes:
+  - Added V1 video-logit distillation on top of the existing CE + CAFD route.
+  - Added `losses/logits_kd_loss.py` with temperature-scaled KL divergence and optional teacher-confidence filtering.
+  - Updated frozen `S3DTeacher` so the trained 9-class video classifier head is loaded from `../backbone_models/video/video_s3d.pt` instead of being skipped.
+  - Updated V1 forward outputs to include both `video_feature` and `teacher_logits`.
+  - Added `logits_kd` config with default `temperature: 4.0` and `lambda_logits: 0.5`.
+  - Added CLI overrides for fast 4080S ablations: `--lambda-cafd`, `--lambda-logits`, and `--kd-temperature`.
+  - Added V1 teacher prediction fields to validation prediction CSVs and `teacher_accuracy` / `logits_kd_loss` to per-batch logs.
+  - Added `logits_kd` settings to the WiMANS-style `result.json` payload for new runs.
+- Problems found:
+  - Copied CAFD-only V1 run `20260509_103545` with `batch_size=8` reached best `val_acc=0.361667` at epoch 15, still far below the expected single-person HAR target.
+  - Copied CAFD-only V1 run `20260509_195416` with `batch_size=16` reached best `val_acc=0.288587` in the copied log, so simply enlarging the physical CAFD relation batch did not solve the issue.
+  - CAFD-only results still over-predict easy/broad classes such as `nothing` and `wave`; weak classes include `lie_down`, `rotation`, and `sit_down`.
+  - The trained video teacher is strong enough, so the bottleneck is more likely the WiFi student transfer signal than teacher quality.
+- Validation commands:
+  - `python -m compileall .\WiMANS_Baseline\train.py .\WiMANS_Baseline\models .\WiMANS_Baseline\losses .\WiMANS_Baseline\utils`
+  - `python -c "import sys; sys.path.insert(0,'WiMANS_Baseline'); from models.s3d_teacher import S3DTeacher; m=S3DTeacher(weights='kinetics400', freeze=True, checkpoint_path='backbone_models/video/video_s3d.pt', num_classes=9); print(m.checkpoint_extra); print(m.checkpoint_load_info); print(m.model.classifier[1].out_channels)"`
+  - `python -c "import sys, torch; sys.path.insert(0,'WiMANS_Baseline'); from models.s3d_teacher import S3DTeacher; m=S3DTeacher(weights='kinetics400', freeze=True, checkpoint_path='backbone_models/video/video_s3d.pt', num_classes=9).eval(); x=torch.randn(1,3,16,224,224); y=m(x, return_logits=True); print(tuple(y['feature'].shape), tuple(y['logits'].shape), torch.isfinite(y['logits']).all().item())"`
+- Validation result:
+  - Static compile passed.
+  - Trained video teacher checkpoint loaded with `missing_keys=[]`, `unexpected_keys=[]`, `loaded_keys=464`, and classifier output channels `9`.
+  - S3D teacher forward check returned feature shape `(1, 1024)`, logits shape `(1, 9)`, and finite logits.
+  - Full V1b training is pending on the 4080S.
+
+## v0.1.10 - 2026-05-10
+
+- Code commit: `a4eaa91`
+- Changes:
+  - Changed train/validation epoch loss and accuracy aggregation from batch-average to sample-weighted aggregation.
+  - Changed best-checkpoint selection to use the corrected sample-level `val_acc` returned by validation prediction collection.
+  - Added V1 training-loader singleton-tail handling: when the V1 train split leaves exactly one sample after batching, the final one-sample batch is dropped.
+  - Added dataloader batch count, configured batch size, and train `drop_last` status to `train.log`.
+  - Documented the sample-weighted metric behavior and V1 singleton-tail handling in `README.md`.
+- Problems found:
+  - Complete old-code CAFD-only run `20260509_223142` finished 30 epochs with logged best `val_acc=0.321739` at epoch 11.
+  - Recomputing exact sample-level validation accuracy from `val_predictions_epoch_*.csv` shows epoch 15 was actually highest at `116/357 = 0.324930`; epoch 11 was `114/357 = 0.319328`.
+  - The mismatch happened because old code averaged per-batch validation accuracy, giving the smaller final validation batch the same weight as full batches.
+  - The same run had `1425` train samples with `batch_size=16`, creating one singleton training batch per epoch. Those singleton batches had noisy losses, for example epoch 30 batch 90 had loss `12.253035`.
+  - CAFD-only still underperforms: the complete batch-size-16 run stayed near `0.32` exact validation accuracy and did not approach the required single-person HAR target.
+- Validation commands:
+  - `python -m compileall .\WiMANS_Baseline\train.py`
+  - `python -c "import sys, yaml; sys.path.insert(0,'WiMANS_Baseline'); import train; cfg=yaml.safe_load(open('WiMANS_Baseline/config/config.yaml',encoding='utf-8')); tr,va,tdf,vdf=train.build_loaders(cfg, use_video=True); print(len(tdf),len(vdf),len(tr),len(va),tr.drop_last); tr0,va0,_,_=train.build_loaders(cfg, use_video=False); print(len(tr0),len(va0),tr0.drop_last)"`
+- Validation result:
+  - Static compile passed.
+  - Default V1 loader check: `train=1425`, `val=357`, `train_batches=178`, `val_batches=45`, `train_drop_last=True`.
+  - Default V0 loader check: `train_batches=179`, `val_batches=45`, `train_drop_last=False`.
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.

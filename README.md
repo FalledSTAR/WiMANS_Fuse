@@ -9,7 +9,7 @@ resources in git.
 
 - V0: run a stable 5 GHz single-user WiFi-only HAR baseline with X-Fi WiFi ResNet-18 initialization.
 - Video teacher: train a selectable WiMANS-style visual teacher before distillation.
-- V1: add frozen trained video teacher, Hybrid Projector, and CAFD/BLEND-style feature relation distillation.
+- V1: add frozen trained video teacher, Hybrid Projector, CAFD feature relation distillation, and video-logits KD.
 - Keep the local laptop workflow focused on smoke tests and small runs.
 - Move the whole project, including `.git/`, to the 4080S machine for full training.
 
@@ -120,13 +120,34 @@ V0:
 python train.py --config config\config.yaml --stage v0
 ```
 
-The default V0 config currently uses `epochs: 8` and `batch_size: 1` for the RTX 3050
-laptop check.
+The shared config currently targets 4080S-side comparison runs. For a laptop smoke
+run, use `--sample-limit` or copy the config and reduce `train.batch_size`,
+`train.epochs`, and `video.num_frames`.
 
 V1:
 
 ```powershell
 python train.py --config config\config.yaml --stage v1
+```
+
+The default V1 config now uses the trained teacher at
+`../backbone_models/video/video_s3d.pt` for two signals:
+
+- CAFD feature relation distillation with `cafd.lambda_cafd`.
+- Teacher-class probability distillation with `logits_kd.lambda_logits`.
+
+For a CAFD-only ablation, set `logits_kd.lambda_logits: 0.0` in a copied config.
+For a WiFi-only same-split ablation, run `--stage v0` with the same data section.
+For a logits-only ablation, set `cafd.lambda_cafd: 0.0` and keep
+`logits_kd.lambda_logits` enabled.
+
+Useful 4080S ablation commands:
+
+```powershell
+python train.py --config config\config.yaml --stage v1 --lambda-logits 0.5
+python train.py --config config\config.yaml --stage v1 --lambda-logits 0.25
+python train.py --config config\config.yaml --stage v1 --lambda-logits 0.0
+python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.0 --lambda-logits 0.5
 ```
 
 Laptop-sized V1 training check:
@@ -193,9 +214,9 @@ folder and keep this path stable:
 ```
 
 `config/config.yaml` uses that path by default through `video.teacher_checkpoint`.
-Video-teacher training also keeps the top 3 validation checkpoints; filenames include
-epoch, validation accuracy, and validation loss, with `top_k_checkpoints.csv` recording
-their ranking.
+Video-teacher training also keeps the top 3 validation checkpoint weight files.
+Filenames include epoch, validation accuracy, and validation loss, with
+`top_k_checkpoints.csv` recording their ranking.
 
 Use that checkpoint later as the visual teacher branch for the first distillation
 experiment. Keep `--weights none` only for smoke tests; real teacher training should
@@ -217,7 +238,8 @@ output/wimans_5g_single_baseline/v0/<RUN_ID>/splits/test_predictions.csv
 ```
 
 Prediction CSV files include `sample_id`, true class, predicted class, correctness,
-loss, and per-class probabilities.
+loss, and per-class probabilities. V1 prediction files also include frozen video
+teacher prediction fields and teacher per-class probabilities.
 
 ## Head Strategy Check
 
@@ -247,6 +269,7 @@ config.yaml                 # effective config after CLI overrides
 train.log                   # config, split paths, model structure, params/FLOPs, training details
 model.txt                   # full model structure
 model_summary.yaml          # parameter counts and MAC/FLOP estimates
+result.json                 # WiMANS-style metrics plus per-epoch/per-class/per-scene details
 splits/train.csv            # saved training split
 splits/val.csv              # saved validation split
 splits/val_predictions_*.csv # validation prediction-vs-ground-truth files
@@ -254,8 +277,19 @@ splits/test_predictions.csv # test.py prediction-vs-ground-truth file
 metrics/train_batches.csv   # per-batch training loss/accuracy details
 metrics/epochs.csv          # per-epoch train/validation summary
 checkpoints/best.pt         # best validation checkpoint
+checkpoints/epoch_*_acc_*_loss_*.pt # top-3 video teacher checkpoint weights
 checkpoints/top_k_checkpoints.csv # top checkpoint ranking for video teacher runs
 ```
+
+For V1 runs, `metrics/train_batches.csv` records `classification_loss`,
+`cafd_loss`, `logits_kd_loss`, student accuracy, and frozen teacher accuracy.
+Historical `output/` folders are not backfilled; use new run directories for the
+current result format.
+
+Training and validation epoch metrics are sample-weighted. V1 training also drops
+a singleton tail batch when the training split leaves exactly one sample after
+batching, because CAFD relation matrices are not meaningful for a one-sample
+training batch.
 
 Current 3050 validation run:
 
