@@ -140,14 +140,18 @@ For a CAFD-only ablation, set `logits_kd.lambda_logits: 0.0` in a copied config.
 For a WiFi-only same-split ablation, run `--stage v0` with the same data section.
 For a logits-only ablation, set `cafd.lambda_cafd: 0.0` and keep
 `logits_kd.lambda_logits` enabled.
+The default logits KD is intentionally conservative: `lambda_logits: 0.1` with
+`warmup_epochs: 5`. Earlier `lambda_logits: 0.5` runs made the weighted KD term
+much larger than CE and only improved best validation accuracy to about `0.375`.
 
 Useful 4080S ablation commands:
 
 ```powershell
 python train.py --config config\config.yaml --stage v1 --lambda-logits 0.5
 python train.py --config config\config.yaml --stage v1 --lambda-logits 0.25
+python train.py --config config\config.yaml --stage v1 --lambda-logits 0.1 --kd-warmup-epochs 5
 python train.py --config config\config.yaml --stage v1 --lambda-logits 0.0
-python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.0 --lambda-logits 0.5
+python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.0 --lambda-logits 0.1 --kd-warmup-epochs 5
 ```
 
 Laptop-sized V1 training check:
@@ -282,7 +286,8 @@ checkpoints/top_k_checkpoints.csv # top checkpoint ranking for video teacher run
 ```
 
 For V1 runs, `metrics/train_batches.csv` records `classification_loss`,
-`cafd_loss`, `logits_kd_loss`, student accuracy, and frozen teacher accuracy.
+`cafd_loss`, raw and weighted `logits_kd_loss`, effective logits KD lambda,
+student accuracy, and frozen teacher accuracy.
 Historical `output/` folders are not backfilled; use new run directories for the
 current result format.
 
