@@ -286,6 +286,29 @@ recorded here before moving the project to the 4080S machine.
   - Default V1 loader check: `train=1425`, `val=357`, `train_batches=178`, `val_batches=45`, `train_drop_last=True`.
   - Default V0 loader check: `train_batches=179`, `val_batches=45`, `train_drop_last=False`.
 
+## v0.1.11 - 2026-05-10
+
+- Code commit: `d8ad31e`
+- Changes:
+  - Reduced default video-logit KD weight from `lambda_logits: 0.5` to `0.1`.
+  - Added `logits_kd.warmup_epochs: 5` so the effective KD weight ramps up gradually.
+  - Added CLI override `--kd-warmup-epochs`.
+  - Logged `logits_kd_weighted_loss` and `lambda_logits_effective` in `metrics/train_batches.csv` and `train.log`.
+  - Updated README ablation commands for conservative KD runs.
+- Problems found:
+  - New-code V1 run `20260510_141649` correctly loaded the trained 9-class S3D teacher head with `missing_keys=[]` and `loaded_keys=464`.
+  - The same run enabled `logits_kd.lambda_logits=0.5`, but best validation accuracy was still only `0.375350` at epoch 21.
+  - The frozen video teacher remained reliable: validation teacher accuracy was `356/357 = 0.997199`, and mean teacher true-class probability was about `0.980763`.
+  - The weighted KD term dominated training: around epoch 21, raw `logits_kd_loss` was about `7.64`, so `0.5 * KD` contributed about `3.82`, while CE was about `1.30`.
+  - This suggests the student was over-constrained by sharp video-teacher probabilities before its WiFi representation had enough class separation.
+- Validation commands:
+  - `python -m compileall .\WiMANS_Baseline\train.py`
+  - `python -c "import sys, yaml; sys.path.insert(0,'WiMANS_Baseline'); import train; cfg=yaml.safe_load(open('WiMANS_Baseline/config/config.yaml',encoding='utf-8')); kd=train.get_logits_kd_cfg(cfg); print(kd); print([train.effective_logits_kd_lambda(kd,e) for e in [1,2,5,6]])"`
+- Validation result:
+  - Static compile passed.
+  - KD config check returned `lambda_logits=0.1`, `warmup_epochs=5`.
+  - Effective KD lambda schedule: epoch 1 `0.02`, epoch 2 `0.04`, epoch 5 `0.1`, epoch 6 `0.1`.
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.

@@ -42,6 +42,7 @@ def parse_args():
     parser.add_argument("--lambda-cafd", type=float, default=None)
     parser.add_argument("--lambda-logits", type=float, default=None)
     parser.add_argument("--kd-temperature", type=float, default=None)
+    parser.add_argument("--kd-warmup-epochs", type=int, default=None)
     return parser.parse_args()
 
 
@@ -226,8 +227,19 @@ def get_logits_kd_cfg(cfg) -> dict:
         "enabled": bool(kd_cfg.get("enable", False)) and float(kd_cfg.get("lambda_logits", 0.0)) > 0,
         "lambda_logits": float(kd_cfg.get("lambda_logits", 0.0)),
         "temperature": float(kd_cfg.get("temperature", 4.0)),
+        "warmup_epochs": int(kd_cfg.get("warmup_epochs", 0)),
         "confidence_threshold": float(kd_cfg.get("confidence_threshold", 0.0)),
     }
+
+
+def effective_logits_kd_lambda(kd_cfg: dict, epoch: int) -> float:
+    target = float(kd_cfg["lambda_logits"])
+    warmup_epochs = int(kd_cfg.get("warmup_epochs", 0))
+    if not kd_cfg["enabled"] or target <= 0:
+        return 0.0
+    if warmup_epochs <= 0:
+        return target
+    return target * min(max(int(epoch), 1) / warmup_epochs, 1.0)
 
 
 def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_loss_fn=None, logger=None, batch_csv_path=None):
@@ -238,6 +250,7 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
     batch_rows = []
     log_interval = max(int(cfg["train"].get("log_interval", 50)), 1)
     kd_cfg = get_logits_kd_cfg(cfg)
+    lambda_logits_effective = effective_logits_kd_lambda(kd_cfg, epoch)
     samples_seen = 0
     for batch_idx, batch in enumerate(loader, start=1):
         wifi = batch["wifi"].float().to(device)
@@ -252,6 +265,8 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             cls_loss_value = float(loss.item())
             cafd_loss_value = None
             logits_kd_loss_value = None
+            logits_kd_weighted_value = None
+            lambda_logits_value = None
             teacher_acc_value = None
         else:
             video = batch["video"].float().to(device)
@@ -261,17 +276,19 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             cafd_loss = cafd_loss_fn(outputs["wifi_projected"], outputs["video_projected"])
             loss = cls_loss + float(cfg["cafd"]["lambda_cafd"]) * cafd_loss
             logits_kd_value = None
-            if kd_cfg["enabled"]:
+            if kd_cfg["enabled"] and lambda_logits_effective > 0:
                 logits_kd_value = logits_kd_loss(
                     logits,
                     outputs["teacher_logits"],
                     temperature=kd_cfg["temperature"],
                     confidence_threshold=kd_cfg["confidence_threshold"],
                 )
-                loss = loss + kd_cfg["lambda_logits"] * logits_kd_value
+                loss = loss + lambda_logits_effective * logits_kd_value
             cls_loss_value = float(cls_loss.item())
             cafd_loss_value = float(cafd_loss.item())
             logits_kd_loss_value = None if logits_kd_value is None else float(logits_kd_value.item())
+            logits_kd_weighted_value = None if logits_kd_value is None else float((lambda_logits_effective * logits_kd_value).item())
+            lambda_logits_value = lambda_logits_effective
             teacher_acc_value = accuracy_top1(outputs["teacher_logits"].detach(), labels.detach())
 
         loss.backward()
@@ -289,6 +306,8 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             "classification_loss": cls_loss_value,
             "cafd_loss": cafd_loss_value,
             "logits_kd_loss": logits_kd_loss_value,
+            "logits_kd_weighted_loss": logits_kd_weighted_value,
+            "lambda_logits_effective": lambda_logits_value,
             "teacher_accuracy": teacher_acc_value,
             "accuracy": batch_acc,
             "batch_size": int(labels.shape[0]),
@@ -297,7 +316,7 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
 
         if logger is not None and (batch_idx == 1 or batch_idx % log_interval == 0 or batch_idx == len(loader)):
             logger.info(
-                "train epoch=%s batch=%s/%s loss=%.6f cls_loss=%.6f cafd_loss=%s logits_kd_loss=%s teacher_acc=%s acc=%.6f",
+                "train epoch=%s batch=%s/%s loss=%.6f cls_loss=%.6f cafd_loss=%s logits_kd_loss=%s logits_kd_weighted=%s lambda_logits=%s teacher_acc=%s acc=%.6f",
                 epoch,
                 batch_idx,
                 len(loader),
@@ -305,6 +324,8 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
                 row["classification_loss"],
                 "None" if row["cafd_loss"] is None else f"{row['cafd_loss']:.6f}",
                 "None" if row["logits_kd_loss"] is None else f"{row['logits_kd_loss']:.6f}",
+                "None" if row["logits_kd_weighted_loss"] is None else f"{row['logits_kd_weighted_loss']:.6f}",
+                "None" if row["lambda_logits_effective"] is None else f"{row['lambda_logits_effective']:.6f}",
                 "None" if row["teacher_accuracy"] is None else f"{row['teacher_accuracy']:.6f}",
                 row["accuracy"],
             )
@@ -321,6 +342,8 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
                 "classification_loss",
                 "cafd_loss",
                 "logits_kd_loss",
+                "logits_kd_weighted_loss",
+                "lambda_logits_effective",
                 "teacher_accuracy",
                 "accuracy",
                 "batch_size",
@@ -446,6 +469,8 @@ def main():
         cfg["logits_kd"]["enable"] = args.lambda_logits > 0
     if args.kd_temperature is not None:
         cfg.setdefault("logits_kd", {})["temperature"] = args.kd_temperature
+    if args.kd_warmup_epochs is not None:
+        cfg.setdefault("logits_kd", {})["warmup_epochs"] = args.kd_warmup_epochs
     seed_everything(int(cfg["experiment"]["seed"]))
     device = select_device(cfg["train"]["device"])
 
@@ -519,10 +544,11 @@ def main():
             beta=float(cfg["cafd"]["beta"]),
         )
         logger.info(
-            "logits_kd enabled=%s lambda=%.4f temperature=%.4f confidence_threshold=%.4f",
+            "logits_kd enabled=%s lambda=%.4f temperature=%.4f warmup_epochs=%d confidence_threshold=%.4f",
             kd_cfg["enabled"],
             kd_cfg["lambda_logits"],
             kd_cfg["temperature"],
+            kd_cfg["warmup_epochs"],
             kd_cfg["confidence_threshold"],
         )
 
