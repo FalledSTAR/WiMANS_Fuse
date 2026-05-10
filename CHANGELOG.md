@@ -288,7 +288,7 @@ recorded here before moving the project to the 4080S machine.
 
 ## v0.1.11 - 2026-05-10
 
-- Code commit: `pending`
+- Code commit: `d8ad31e`
 - Changes:
   - Reduced default video-logit KD weight from `lambda_logits: 0.5` to `0.1`.
   - Added `logits_kd.warmup_epochs: 5` so the effective KD weight ramps up gradually.
