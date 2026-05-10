@@ -83,16 +83,19 @@ def build_loaders(cfg, use_video: bool):
     }
     train_dataset = WiMANSHARDataset(train_df, **dataset_kwargs)
     val_dataset = WiMANSHARDataset(val_df, **dataset_kwargs)
+    batch_size = int(cfg["train"]["batch_size"])
+    drop_last_train = bool(use_video and len(train_dataset) > batch_size and len(train_dataset) % batch_size == 1)
     train_loader = DataLoader(
         train_dataset,
-        batch_size=int(cfg["train"]["batch_size"]),
+        batch_size=batch_size,
         shuffle=True,
         num_workers=int(cfg["train"]["num_workers"]),
         pin_memory=torch.cuda.is_available(),
+        drop_last=drop_last_train,
     )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=int(cfg["train"]["batch_size"]),
+        batch_size=batch_size,
         shuffle=False,
         num_workers=int(cfg["train"]["num_workers"]),
         pin_memory=torch.cuda.is_available(),
@@ -230,13 +233,17 @@ def get_logits_kd_cfg(cfg) -> dict:
 def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_loss_fn=None, logger=None, batch_csv_path=None):
     model.train()
     total_loss = 0.0
-    total_acc = 0.0
+    total_correct = 0.0
+    total_samples = 0
     batch_rows = []
     log_interval = max(int(cfg["train"].get("log_interval", 50)), 1)
     kd_cfg = get_logits_kd_cfg(cfg)
+    samples_seen = 0
     for batch_idx, batch in enumerate(loader, start=1):
         wifi = batch["wifi"].float().to(device)
         labels = batch["label"].to(device)
+        batch_size = int(labels.shape[0])
+        samples_seen += batch_size
         optimizer.zero_grad()
 
         if stage == "v0":
@@ -270,13 +277,14 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
         loss.backward()
         optimizer.step()
         batch_acc = accuracy_top1(logits.detach(), labels.detach())
-        total_loss += float(loss.item())
-        total_acc += batch_acc
+        total_loss += float(loss.item()) * batch_size
+        total_correct += batch_acc * batch_size
+        total_samples += batch_size
 
         row = {
             "epoch": epoch,
             "batch": batch_idx,
-            "samples_seen": batch_idx * int(cfg["train"]["batch_size"]),
+            "samples_seen": samples_seen,
             "loss": float(loss.item()),
             "classification_loss": cls_loss_value,
             "cafd_loss": cafd_loss_value,
@@ -319,37 +327,42 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             ],
         )
 
-    return total_loss / max(len(loader), 1), total_acc / max(len(loader), 1)
+    return total_loss / max(total_samples, 1), total_correct / max(total_samples, 1)
 
 
 @torch.no_grad()
 def evaluate(model, loader, device, stage):
     model.eval()
-    total_acc = 0.0
     total_loss = 0.0
+    total_correct = 0.0
+    total_samples = 0
     for batch in loader:
         wifi = batch["wifi"].float().to(device)
         labels = batch["label"].to(device)
+        batch_size = int(labels.shape[0])
         if stage == "v0":
             logits = model(wifi)
         else:
             video = batch["video"].float().to(device)
             logits = model(wifi, video)["logits"]
         loss = classification_loss(logits, labels, "single_ce")
-        total_loss += float(loss.item())
-        total_acc += accuracy_top1(logits, labels)
-    return total_loss / max(len(loader), 1), total_acc / max(len(loader), 1)
+        total_loss += float(loss.item()) * batch_size
+        total_correct += accuracy_top1(logits, labels) * batch_size
+        total_samples += batch_size
+    return total_loss / max(total_samples, 1), total_correct / max(total_samples, 1)
 
 
 @torch.no_grad()
 def collect_predictions(model, loader, device, stage):
     model.eval()
     rows = []
-    total_acc = 0.0
     total_loss = 0.0
+    total_correct = 0
+    total_samples = 0
     for batch in loader:
         wifi = batch["wifi"].float().to(device)
         labels = batch["label"].to(device)
+        batch_size = int(labels.shape[0])
         teacher_logits = None
         if stage == "v0":
             logits = model(wifi)
@@ -370,8 +383,9 @@ def collect_predictions(model, loader, device, stage):
             teacher_probs = torch.softmax(teacher_logits, dim=-1)
             teacher_pred_ids = teacher_probs.argmax(dim=-1)
             teacher_correct = teacher_pred_ids.eq(labels.long())
-        total_loss += float(loss.item())
-        total_acc += correct.float().mean().item()
+        total_loss += float(loss.item()) * batch_size
+        total_correct += int(correct.long().sum().item())
+        total_samples += batch_size
 
         sample_ids = batch["sample_id"]
         if isinstance(sample_ids, str):
@@ -411,7 +425,7 @@ def collect_predictions(model, loader, device, stage):
                     row[f"teacher_prob_{class_id}_{class_name}"] = float(teacher_item_probs[class_id])
             rows.append(row)
 
-    return total_loss / max(len(loader), 1), total_acc / max(len(loader), 1), rows
+    return total_loss / max(total_samples, 1), total_correct / max(total_samples, 1), rows
 
 
 def main():
@@ -452,6 +466,13 @@ def main():
     train_df.to_csv(run_dir / "splits" / "train.csv", index=False, encoding="utf-8-sig")
     val_df.to_csv(run_dir / "splits" / "val.csv", index=False, encoding="utf-8-sig")
     logger.info("dataset_split train=%s val=%s", len(train_df), len(val_df))
+    logger.info(
+        "dataloader train_batches=%s val_batches=%s train_drop_last=%s batch_size=%s",
+        len(train_loader),
+        len(val_loader),
+        getattr(train_loader, "drop_last", False),
+        int(cfg["train"]["batch_size"]),
+    )
     logger.info("saved_train_split=%s", run_dir / "splits" / "train.csv")
     logger.info("saved_val_split=%s", run_dir / "splits" / "val.csv")
 

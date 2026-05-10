@@ -263,6 +263,29 @@ recorded here before moving the project to the 4080S machine.
   - S3D teacher forward check returned feature shape `(1, 1024)`, logits shape `(1, 9)`, and finite logits.
   - Full V1b training is pending on the 4080S.
 
+## v0.1.10 - 2026-05-10
+
+- Code commit: `pending`
+- Changes:
+  - Changed train/validation epoch loss and accuracy aggregation from batch-average to sample-weighted aggregation.
+  - Changed best-checkpoint selection to use the corrected sample-level `val_acc` returned by validation prediction collection.
+  - Added V1 training-loader singleton-tail handling: when the V1 train split leaves exactly one sample after batching, the final one-sample batch is dropped.
+  - Added dataloader batch count, configured batch size, and train `drop_last` status to `train.log`.
+  - Documented the sample-weighted metric behavior and V1 singleton-tail handling in `README.md`.
+- Problems found:
+  - Complete old-code CAFD-only run `20260509_223142` finished 30 epochs with logged best `val_acc=0.321739` at epoch 11.
+  - Recomputing exact sample-level validation accuracy from `val_predictions_epoch_*.csv` shows epoch 15 was actually highest at `116/357 = 0.324930`; epoch 11 was `114/357 = 0.319328`.
+  - The mismatch happened because old code averaged per-batch validation accuracy, giving the smaller final validation batch the same weight as full batches.
+  - The same run had `1425` train samples with `batch_size=16`, creating one singleton training batch per epoch. Those singleton batches had noisy losses, for example epoch 30 batch 90 had loss `12.253035`.
+  - CAFD-only still underperforms: the complete batch-size-16 run stayed near `0.32` exact validation accuracy and did not approach the required single-person HAR target.
+- Validation commands:
+  - `python -m compileall .\WiMANS_Baseline\train.py`
+  - `python -c "import sys, yaml; sys.path.insert(0,'WiMANS_Baseline'); import train; cfg=yaml.safe_load(open('WiMANS_Baseline/config/config.yaml',encoding='utf-8')); tr,va,tdf,vdf=train.build_loaders(cfg, use_video=True); print(len(tdf),len(vdf),len(tr),len(va),tr.drop_last); tr0,va0,_,_=train.build_loaders(cfg, use_video=False); print(len(tr0),len(va0),tr0.drop_last)"`
+- Validation result:
+  - Static compile passed.
+  - Default V1 loader check: `train=1425`, `val=357`, `train_batches=178`, `val_batches=45`, `train_drop_last=True`.
+  - Default V0 loader check: `train_batches=179`, `val_batches=45`, `train_drop_last=False`.
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.

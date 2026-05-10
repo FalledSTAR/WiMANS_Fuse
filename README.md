@@ -286,6 +286,11 @@ For V1 runs, `metrics/train_batches.csv` records `classification_loss`,
 Historical `output/` folders are not backfilled; use new run directories for the
 current result format.
 
+Training and validation epoch metrics are sample-weighted. V1 training also drops
+a singleton tail batch when the training split leaves exactly one sample after
+batching, because CAFD relation matrices are not meaningful for a one-sample
+training batch.
+
 Current 3050 validation run:
 
 ```text
