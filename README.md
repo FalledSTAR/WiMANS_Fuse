@@ -124,24 +124,6 @@ The shared config currently targets 4080S-side comparison runs. For a laptop smo
 run, use `--sample-limit` or copy the config and reduce `train.batch_size`,
 `train.epochs`, and `video.num_frames`.
 
-WiMANS official-style WiFi-only baseline candidates:
-
-```powershell
-python train.py --config config\config.yaml --stage v0 --wifi-model cnn2d --epochs 100 --batch-size 64 --lr-head 1e-3 --normalize zscore --no-flops
-python train.py --config config\config.yaml --stage v0 --wifi-model that --epochs 100 --batch-size 32 --lr-head 1e-3 --normalize zscore --no-flops
-```
-
-Useful normalization checks:
-
-```powershell
-python train.py --config config\config.yaml --stage v0 --wifi-model cnn2d --epochs 100 --batch-size 64 --lr-head 1e-3 --normalize none --no-flops
-python train.py --config config\config.yaml --stage v0 --wifi-model cnn2d --epochs 100 --batch-size 64 --lr-head 1e-3 --normalize log1p_zscore --no-flops
-```
-
-These runs are now the preferred next baseline checks because the X-Fi ResNet-18
-amplitude-only route plus video distillation has stayed near `0.3-0.4` validation
-accuracy on the 5 GHz single-person three-scene split.
-
 V1:
 
 ```powershell

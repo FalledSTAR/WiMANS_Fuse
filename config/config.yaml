@@ -27,7 +27,6 @@ video:
   num_frames: 90
 
 model:
-  wifi_model: xfi_resnet18
   wifi_backbone: xfi_resnet18
   xfi_weight_path: ../backbone_models/WiFi/wifi_ResNet18.pt
   wifi_input_channels: 270
