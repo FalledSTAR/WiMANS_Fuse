@@ -12,7 +12,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from datasets import ID_TO_ACTIVITY, WiMANSHARDataset, build_single_user_dataframe, build_single_user_label  # noqa: E402
 from losses import CAFDLoss, classification_loss, logits_kd_loss  # noqa: E402
-from models import VideoWiFiCAFDModel, XFiWiFiStudent  # noqa: E402
+from models import VideoWiFiCAFDModel, WiMANSWiFiCNN2D, WiMANSWiFiTHAT, XFiWiFiStudent  # noqa: E402
 from utils import (  # noqa: E402
     accuracy_top1,
     append_csv_rows,
@@ -39,6 +39,14 @@ def parse_args():
     parser.add_argument("--num-frames", type=int, default=None)
     parser.add_argument("--s3d-weights", default=None)
     parser.add_argument("--teacher-checkpoint", default=None)
+    parser.add_argument("--wifi-model", choices=["xfi_resnet18", "cnn2d", "that"], default=None)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--lr-backbone", type=float, default=None)
+    parser.add_argument("--lr-head", type=float, default=None)
+    parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument("--normalize", choices=["none", "zscore", "log1p_zscore"], default=None)
+    parser.add_argument("--no-flops", action="store_true")
     parser.add_argument("--lambda-cafd", type=float, default=None)
     parser.add_argument("--lambda-logits", type=float, default=None)
     parser.add_argument("--kd-temperature", type=float, default=None)
@@ -105,9 +113,23 @@ def build_loaders(cfg, use_video: bool):
 
 
 def build_model(cfg, stage: str):
+    wifi_model = str(cfg["model"].get("wifi_model", cfg["model"].get("wifi_backbone", "xfi_resnet18"))).lower()
     weight_path = resolve_path(PROJECT_ROOT, cfg["model"]["xfi_weight_path"])
     if stage == "v0":
-        return XFiWiFiStudent(weight_path=weight_path, num_classes=cfg["model"]["num_classes"])
+        if wifi_model == "xfi_resnet18":
+            return XFiWiFiStudent(weight_path=weight_path, num_classes=cfg["model"]["num_classes"])
+        if wifi_model == "cnn2d":
+            return WiMANSWiFiCNN2D(num_classes=cfg["model"]["num_classes"])
+        if wifi_model == "that":
+            return WiMANSWiFiTHAT(
+                num_classes=cfg["model"]["num_classes"],
+                time_dim=int(cfg["data"]["target_len"]),
+                feature_dim=int(cfg["model"]["wifi_input_channels"]),
+            )
+        raise ValueError(f"Unsupported wifi_model for v0: {wifi_model}")
+
+    if wifi_model != "xfi_resnet18":
+        raise ValueError("V1 CAFD currently supports wifi_model=xfi_resnet18 only. Train cnn2d/that with --stage v0 first.")
 
     teacher_checkpoint = cfg["video"].get("teacher_checkpoint")
     teacher_checkpoint_path = resolve_path(PROJECT_ROOT, teacher_checkpoint) if teacher_checkpoint else None
@@ -139,13 +161,15 @@ def build_optimizer(model, cfg, stage: str, logger=None) -> torch.optim.Optimize
     weight_decay = float(cfg["train"]["weight_decay"])
 
     # Collect backbone parameter ids so we can split the groups cleanly.
-    if stage == "v0":
+    if stage == "v0" and hasattr(model, "feature_extractor"):
         # XFiWiFiStudent: feature_extractor is the pretrained backbone.
         backbone_params = list(model.feature_extractor.parameters())
-    else:
+    elif stage == "v1":
         # VideoWiFiCAFDModel: wifi_student.feature_extractor is the pretrained backbone.
         # S3D teacher is frozen entirely and contributes no gradients.
         backbone_params = list(model.wifi_student.feature_extractor.parameters())
+    else:
+        backbone_params = []
 
     backbone_ids = {id(p) for p in backbone_params}
     backbone_trainable = [p for p in backbone_params if p.requires_grad]
@@ -462,6 +486,24 @@ def main():
         cfg["video"]["s3d_weights"] = args.s3d_weights
     if args.teacher_checkpoint is not None:
         cfg["video"]["teacher_checkpoint"] = args.teacher_checkpoint
+    if args.wifi_model is not None:
+        cfg.setdefault("model", {})["wifi_model"] = args.wifi_model
+        cfg["model"]["wifi_backbone"] = args.wifi_model
+    if args.epochs is not None:
+        cfg.setdefault("train", {})["epochs"] = args.epochs
+    if args.batch_size is not None:
+        cfg.setdefault("train", {})["batch_size"] = args.batch_size
+    if args.lr_backbone is not None:
+        cfg.setdefault("train", {})["lr_backbone"] = args.lr_backbone
+    if args.lr_head is not None:
+        cfg.setdefault("train", {})["lr_head"] = args.lr_head
+        cfg["train"]["lr_projector"] = args.lr_head
+    if args.num_workers is not None:
+        cfg.setdefault("train", {})["num_workers"] = args.num_workers
+    if args.normalize is not None:
+        cfg.setdefault("data", {})["normalize"] = None if args.normalize == "none" else args.normalize
+    if args.no_flops:
+        cfg.setdefault("logging", {})["compute_flops"] = False
     if args.lambda_cafd is not None:
         cfg.setdefault("cafd", {})["lambda_cafd"] = args.lambda_cafd
     if args.lambda_logits is not None:
@@ -519,8 +561,9 @@ def main():
 
     class_names = [ID_TO_ACTIVITY[class_id] for class_id in sorted(ID_TO_ACTIVITY)]
     kd_cfg = get_logits_kd_cfg(cfg)
+    wifi_model = str(cfg["model"].get("wifi_model", cfg["model"].get("wifi_backbone", "xfi_resnet18"))).lower()
     if args.stage == "v0":
-        model_name = "xfi_resnet18"
+        model_name = f"wifi_{wifi_model}"
     elif kd_cfg["enabled"]:
         model_name = "xfi_resnet18_with_s3d_cafd_logit_kd"
     else:

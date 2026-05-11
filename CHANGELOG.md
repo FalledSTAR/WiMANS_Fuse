@@ -309,6 +309,36 @@ recorded here before moving the project to the 4080S machine.
   - KD config check returned `lambda_logits=0.1`, `warmup_epochs=5`.
   - Effective KD lambda schedule: epoch 1 `0.02`, epoch 2 `0.04`, epoch 5 `0.1`, epoch 6 `0.1`.
 
+## v0.1.12 - 2026-05-11
+
+- Code commit: `pending`
+- Changes:
+  - Added WiMANS official-style WiFi-only candidate models:
+    - `WiMANSWiFiCNN2D`, treating CSI amplitude as a time-feature heatmap.
+    - `WiMANSWiFiTHAT`, ported from the WiMANS official THAT baseline structure.
+  - Added `--wifi-model {xfi_resnet18,cnn2d,that}` for V0 training.
+  - Added run-time overrides useful for baseline sweeps: `--epochs`, `--batch-size`, `--lr-head`, `--lr-backbone`, `--num-workers`, `--normalize`, and `--no-flops`.
+  - Kept V1 CAFD restricted to `wifi_model=xfi_resnet18` for now; `cnn2d` and `that` should first be validated as WiFi-only baselines.
+  - Updated README with recommended CNN2D/THAT and normalization ablation commands.
+- Problems found:
+  - New V1 run `20260510_201909` used the conservative KD config `lambda_logits=0.1` with `warmup_epochs=5`.
+  - It improved over previous V1 runs but still only reached `best_val_acc=0.400560` at epoch 28.
+  - The trained video teacher remained excellent (`teacher_val_acc=0.997199`), so the bottleneck is the WiFi student/input representation, not the teacher.
+  - Current X-Fi ResNet-18 amplitude-only baseline plus video distillation is therefore considered unqualified for the single-person HAR target.
+  - Strong remaining failures include `stand_up=0.150`, `pick_up=0.175`, `sit_down=0.179`, and `walk=0.282` in the best latest run.
+- Validation commands:
+  - `python -m compileall .\WiMANS_Baseline\train.py .\WiMANS_Baseline\models\wimans_wifi_models.py .\WiMANS_Baseline\models\__init__.py`
+  - `python -c "import sys, torch; sys.path.insert(0,'WiMANS_Baseline'); from models import WiMANSWiFiCNN2D, WiMANSWiFiTHAT; x=torch.randn(2,270,3000); m=WiMANSWiFiCNN2D(9); y=m(x, return_features=True); print('cnn2d', tuple(y['logits'].shape), tuple(y['feature'].shape), tuple(y['tokens'].shape)); m=WiMANSWiFiTHAT(9,3000,270); y=m(x, return_features=True); print('that', tuple(y['logits'].shape), tuple(y['feature'].shape), tuple(y['tokens'].shape))"`
+  - `python -c "import sys, yaml; sys.path.insert(0,'WiMANS_Baseline'); import train; cfg=yaml.safe_load(open('WiMANS_Baseline/config/config.yaml',encoding='utf-8')); cfg['model']['wifi_model']='cnn2d'; m=train.build_model(cfg,'v0'); print(type(m).__name__); cfg['model']['wifi_model']='that'; m=train.build_model(cfg,'v0'); print(type(m).__name__)"`
+  - `python train.py --config config\config.yaml --stage v0 --wifi-model cnn2d --sample-limit 18 --epochs 1 --batch-size 6 --lr-head 1e-3 --normalize zscore --no-flops`
+- Validation result:
+  - Static compile passed.
+  - Forward checks passed:
+    - CNN2D logits `(2, 9)`, feature `(2, 128)`, tokens `(2, 1, 128)`.
+    - THAT logits `(2, 9)`, feature `(2, 288)`, tokens `(2, 1, 288)`.
+  - `train.build_model` correctly constructs `WiMANSWiFiCNN2D` and `WiMANSWiFiTHAT`.
+  - CNN2D tiny smoke-training run completed and saved standard run artifacts.
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.
