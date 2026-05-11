@@ -267,13 +267,22 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             logits_kd_loss_value = None
             logits_kd_weighted_value = None
             lambda_logits_value = None
+            cafd_weighted_mse_value = None
+            cafd_correlation_value = None
+            cafd_diagonal_gap_value = None
+            cafd_relation_kl_value = None
+            cafd_plain_mse_value = None
             teacher_acc_value = None
         else:
             video = batch["video"].float().to(device)
             outputs = model(wifi, video)
             logits = outputs["logits"]
             cls_loss = classification_loss(logits, labels, "single_ce")
-            cafd_loss = cafd_loss_fn(outputs["wifi_projected"], outputs["video_projected"])
+            cafd_loss, cafd_details = cafd_loss_fn(
+                outputs["wifi_projected"],
+                outputs["video_projected"],
+                return_details=True,
+            )
             loss = cls_loss + float(cfg["cafd"]["lambda_cafd"]) * cafd_loss
             logits_kd_value = None
             if kd_cfg["enabled"] and lambda_logits_effective > 0:
@@ -289,6 +298,11 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             logits_kd_loss_value = None if logits_kd_value is None else float(logits_kd_value.item())
             logits_kd_weighted_value = None if logits_kd_value is None else float((lambda_logits_effective * logits_kd_value).item())
             lambda_logits_value = lambda_logits_effective
+            cafd_weighted_mse_value = float(cafd_details["weighted_mse"].item())
+            cafd_correlation_value = float(cafd_details["correlation"].item())
+            cafd_diagonal_gap_value = float(cafd_details["diagonal_gap"].item())
+            cafd_relation_kl_value = float(cafd_details["relation_kl"].item())
+            cafd_plain_mse_value = float(cafd_details["plain_mse"].item())
             teacher_acc_value = accuracy_top1(outputs["teacher_logits"].detach(), labels.detach())
 
         loss.backward()
@@ -305,6 +319,11 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             "loss": float(loss.item()),
             "classification_loss": cls_loss_value,
             "cafd_loss": cafd_loss_value,
+            "cafd_weighted_mse": cafd_weighted_mse_value,
+            "cafd_correlation": cafd_correlation_value,
+            "cafd_diagonal_gap": cafd_diagonal_gap_value,
+            "cafd_relation_kl": cafd_relation_kl_value,
+            "cafd_plain_mse": cafd_plain_mse_value,
             "logits_kd_loss": logits_kd_loss_value,
             "logits_kd_weighted_loss": logits_kd_weighted_value,
             "lambda_logits_effective": lambda_logits_value,
@@ -316,13 +335,18 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
 
         if logger is not None and (batch_idx == 1 or batch_idx % log_interval == 0 or batch_idx == len(loader)):
             logger.info(
-                "train epoch=%s batch=%s/%s loss=%.6f cls_loss=%.6f cafd_loss=%s logits_kd_loss=%s logits_kd_weighted=%s lambda_logits=%s teacher_acc=%s acc=%.6f",
+                "train epoch=%s batch=%s/%s loss=%.6f cls_loss=%.6f cafd_loss=%s cafd_weighted_mse=%s cafd_correlation=%s cafd_diagonal_gap=%s cafd_relation_kl=%s cafd_plain_mse=%s logits_kd_loss=%s logits_kd_weighted=%s lambda_logits=%s teacher_acc=%s acc=%.6f",
                 epoch,
                 batch_idx,
                 len(loader),
                 row["loss"],
                 row["classification_loss"],
                 "None" if row["cafd_loss"] is None else f"{row['cafd_loss']:.6f}",
+                "None" if row["cafd_weighted_mse"] is None else f"{row['cafd_weighted_mse']:.6f}",
+                "None" if row["cafd_correlation"] is None else f"{row['cafd_correlation']:.6f}",
+                "None" if row["cafd_diagonal_gap"] is None else f"{row['cafd_diagonal_gap']:.6f}",
+                "None" if row["cafd_relation_kl"] is None else f"{row['cafd_relation_kl']:.6f}",
+                "None" if row["cafd_plain_mse"] is None else f"{row['cafd_plain_mse']:.6f}",
                 "None" if row["logits_kd_loss"] is None else f"{row['logits_kd_loss']:.6f}",
                 "None" if row["logits_kd_weighted_loss"] is None else f"{row['logits_kd_weighted_loss']:.6f}",
                 "None" if row["lambda_logits_effective"] is None else f"{row['lambda_logits_effective']:.6f}",
@@ -341,6 +365,11 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
                 "loss",
                 "classification_loss",
                 "cafd_loss",
+                "cafd_weighted_mse",
+                "cafd_correlation",
+                "cafd_diagonal_gap",
+                "cafd_relation_kl",
+                "cafd_plain_mse",
                 "logits_kd_loss",
                 "logits_kd_weighted_loss",
                 "lambda_logits_effective",
@@ -542,6 +571,20 @@ def main():
             temperature=float(cfg["cafd"]["temperature"]),
             alpha=float(cfg["cafd"]["alpha"]),
             beta=float(cfg["cafd"]["beta"]),
+            gamma=float(cfg["cafd"].get("gamma", 1.0)),
+            use_weighted_mse=bool(cfg["cafd"].get("use_weighted_mse", True)),
+            use_correlation=bool(cfg["cafd"].get("use_correlation", True)),
+        )
+        logger.info(
+            "cafd enabled=%s lambda=%.4f temperature=%.4f alpha=%.4f beta=%.4f gamma=%.4f use_weighted_mse=%s use_correlation=%s",
+            bool(cfg["cafd"].get("enable", True)),
+            float(cfg["cafd"]["lambda_cafd"]),
+            float(cfg["cafd"]["temperature"]),
+            float(cfg["cafd"]["alpha"]),
+            float(cfg["cafd"]["beta"]),
+            float(cfg["cafd"].get("gamma", 1.0)),
+            bool(cfg["cafd"].get("use_weighted_mse", True)),
+            bool(cfg["cafd"].get("use_correlation", True)),
         )
         logger.info(
             "logits_kd enabled=%s lambda=%.4f temperature=%.4f warmup_epochs=%d confidence_threshold=%.4f",
