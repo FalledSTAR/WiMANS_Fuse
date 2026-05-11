@@ -133,8 +133,8 @@ python train.py --config config\config.yaml --stage v1
 The default V1 config now uses the trained teacher at
 `../backbone_models/video/video_s3d.pt` for two signals:
 
-- CAFD feature relation distillation with `cafd.lambda_cafd`.
-- Teacher-class probability distillation with `logits_kd.lambda_logits`.
+- CMAD-style CAFD relation distillation with `cafd.lambda_cafd`.
+- Teacher-class probability distillation with `logits_kd.lambda_logits`, which is soft-label KD.
 
 For a CAFD-only ablation, set `logits_kd.lambda_logits: 0.0` in a copied config.
 For a WiFi-only same-split ablation, run `--stage v0` with the same data section.
@@ -147,12 +147,17 @@ much larger than CE and only improved best validation accuracy to about `0.375`.
 Useful 4080S ablation commands:
 
 ```powershell
-python train.py --config config\config.yaml --stage v1 --lambda-logits 0.5
-python train.py --config config\config.yaml --stage v1 --lambda-logits 0.25
 python train.py --config config\config.yaml --stage v1 --lambda-logits 0.1 --kd-warmup-epochs 5
-python train.py --config config\config.yaml --stage v1 --lambda-logits 0.0
+python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.1 --lambda-logits 0.1 --kd-warmup-epochs 5
+python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.1 --lambda-logits 0.0
 python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.0 --lambda-logits 0.1 --kd-warmup-epochs 5
 ```
+
+Run the CMAD-style CAFD plus conservative logits KD first. If it improves,
+compare against CAFD-only to separate the effect of the relation distillation
+from the soft-label KD signal. If both remain far below the single-person HAR
+target, move next to a WiFi heatmap teacher instead of spending more time on
+component ablations.
 
 Laptop-sized V1 training check:
 
