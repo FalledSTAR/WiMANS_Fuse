@@ -311,7 +311,7 @@ recorded here before moving the project to the 4080S machine.
 
 ## v0.1.12 - 2026-05-11
 
-- Code commit: `aee9fe9`
+- Code commit: `pending`
 - Changes:
   - Added WiMANS official-style WiFi-only candidate models:
     - `WiMANSWiFiCNN2D`, treating CSI amplitude as a time-feature heatmap.
