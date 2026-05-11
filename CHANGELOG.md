@@ -309,6 +309,25 @@ recorded here before moving the project to the 4080S machine.
   - KD config check returned `lambda_logits=0.1`, `warmup_epochs=5`.
   - Effective KD lambda schedule: epoch 1 `0.02`, epoch 2 `0.04`, epoch 5 `0.1`, epoch 6 `0.1`.
 
+## v0.1.13 - 2026-05-11
+
+- Revert commits: `b32c5f0`, `3b793c8`
+- Changes:
+  - Reverted the temporary WiMANS official-style `cnn2d/that` baseline integration from v0.1.12.
+  - Removed `models/wimans_wifi_models.py` and the related `--wifi-model` training CLI path.
+  - Restored the current implementation direction to X-Fi WiFi ResNet-18 as the only WiFi student backbone.
+- Problems found:
+  - The user wants to continue the project with X-Fi ResNet-18 rather than switching to WiMANS official WiFi models.
+  - The current X-Fi ResNet-18 baseline remains below the required single-person HAR standard, so follow-up work should improve the teacher/distillation/input auxiliary branch without replacing the student backbone.
+- Validation commands:
+  - `git status --short --branch`
+  - `Test-Path .\WiMANS_Baseline\models\wimans_wifi_models.py`
+  - `Select-String -Path .\WiMANS_Baseline\train.py -Pattern "wifi-model|WiMANSWiFi|cnn2d|that|no-flops|normalize"`
+- Validation result:
+  - The working tree returned to the X-Fi ResNet-18 main path.
+  - `models/wimans_wifi_models.py` no longer exists.
+  - The temporary WiMANS WiFi-model CLI switches are absent from `train.py`.
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.
