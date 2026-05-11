@@ -328,6 +328,26 @@ recorded here before moving the project to the 4080S machine.
   - `models/wimans_wifi_models.py` no longer exists.
   - The temporary WiMANS WiFi-model CLI switches are absent from `train.py`.
 
+## v0.1.14 - 2026-05-11
+
+- Implementation commit: `844df40`
+- Changes:
+  - Reset the invalid feature-KD-only `v0.1.14` route back to `v0.1.13` and removed the old local tag before rebuilding this version.
+  - Replaced the simplified CAFD implementation with a CMAD-style relation distillation loss.
+  - Added weighted MSE, student-student/teacher-teacher correlation alignment, diagonal gap, and bidirectional KL components inside `CAFDLoss`.
+  - Kept logits KD as the soft-label distillation signal with the conservative default `lambda_logits=0.1`, `temperature=4.0`, and `warmup_epochs=5`.
+  - Added CAFD component values to batch logging for diagnosis.
+- Problems found:
+  - The previous CAFD loss was likely too simple to represent the richer relation weighting used by CMAD-style public code.
+  - Standalone feature KD would not directly answer whether the original CAFD simplification was the bottleneck, so it was removed from this route.
+- Validation commands:
+  - `python -m compileall train.py models utils losses datasets scripts`
+  - `python -c "import torch; from losses.cafd_loss import CAFDLoss; ..."`
+- Validation result:
+  - Static compile passed.
+  - CAFD finite/backward smoke check passed for `[8,256]` features.
+  - Student features received gradients, teacher features stayed detached, and batch size 1 remained finite.
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.
