@@ -137,6 +137,12 @@ The default V1 config now uses the trained teacher at
 - Teacher-class probability distillation with `logits_kd.lambda_logits`, which is soft-label KD.
 - RSD feature redundancy suppression with `rsd.lambda_rsd`.
 
+The current default feature target is `projector.target: video_feature`.
+This keeps the trained S3D teacher frozen and maps the WiFi student feature into
+the raw S3D 1024-d feature space. The retained `video_projector` is frozen by
+default through `projector.freeze_video_projector: true` and is not used as the
+CAFD/RSD teacher target in this experiment.
+
 For a CAFD-only ablation, set `logits_kd.lambda_logits: 0.0` and
 `rsd.lambda_rsd: 0.0` in a copied config.
 For a WiFi-only same-split ablation, run `--stage v0` with the same data section.
@@ -156,12 +162,13 @@ python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.1 --lambd
 python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.0 --lambda-logits 0.1 --lambda-rsd 0.001 --kd-warmup-epochs 5
 ```
 
-Run the default RSD-enabled V1 command first. The previous CMAD-style CAFD plus
-conservative logits KD run `20260511_144013` only reached `val_acc=0.324930`,
-so RSD is now the next bridge for cross-modal teacher-student representation
-alignment. If RSD remains far below the single-person HAR target, move next to a
-WiFi heatmap teacher instead of spending more time on CAFD-only component
-ablations.
+Run the default RSD-enabled V1 command first. The earlier projected-target run
+`20260512_095804` still improved slowly and only approached the low `0.3` range,
+because CAFD/RSD were aligned to `video_projected`, a retained but untrained
+video projection head. The current default instead aligns the WiFi student to
+the stable S3D teacher feature. If this remains far below the single-person HAR
+target, move next to a WiFi heatmap teacher instead of spending more time on
+CAFD-only component ablations.
 
 Laptop-sized V1 training check:
 

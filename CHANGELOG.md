@@ -369,6 +369,30 @@ recorded here before moving the project to the 4080S machine.
   - With random `[8,256]` features, raw RSD was about `395.59`, so default `lambda_rsd=0.001` contributes about `0.396` before warmup scaling.
   - Teacher features stayed detached, student features received gradients, and batch size 1 returns a finite zero loss.
 
+## v0.1.16 - 2026-05-12
+
+- Implementation commit: `e78c353`
+- Changes:
+  - Changed the default V1 feature-distillation target from `video_projected` to the frozen S3D teacher raw `video_feature`.
+  - Kept `video_projector` in `VideoWiFiCAFDModel`, but froze it by default with `projector.freeze_video_projector: true`.
+  - Made the WiFi student projector output match the S3D teacher feature dimension when `projector.target: video_feature`.
+  - Added generic `wifi_distill_feature` and `teacher_distill_feature` outputs so CAFD and RSD use the same stable teacher target.
+  - Changed the default RSD source to `distill`, which follows the currently selected feature-distillation pair.
+  - Logged the active projector target, WiFi projector output dimension, and trainable video-projector parameter count at run start.
+- Problems found:
+  - The interrupted RSD run `20260512_095804` was still near the low `0.3` validation-accuracy range.
+  - Its CAFD/RSD target was `video_projected`, but `video_projector` was randomly initialized and teacher-side losses detached the target, so the WiFi student was aligning to an unstable random projection instead of the trained S3D feature.
+  - This does not match the public RSD pattern, where the student side is projected into the teacher feature space while the teacher feature remains fixed.
+- Validation commands:
+  - `python -m compileall train.py models utils losses datasets scripts`
+  - `python -c "import torch; from losses.cafd_loss import CAFDLoss; from losses.rsd_loss import RSDLoss; ..."`
+  - `python -c "import yaml, train; cfg=yaml.safe_load(open('config/config.yaml',encoding='utf-8')); cfg['video']['s3d_weights']='none'; cfg['video']['teacher_checkpoint']=None; m=train.build_model(cfg,'v1'); ..."`
+- Validation result:
+  - Static compile passed.
+  - CAFD/RSD finite/backward smoke check passed for `[8,1024]` features.
+  - Student features received gradients, teacher features stayed detached, and batch size 1 RSD returned a finite zero loss.
+  - Default V1 model construction check returned `projector_target=video_feature`, WiFi projector output dimension `1024`, and `video_trainable=0`.
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.
