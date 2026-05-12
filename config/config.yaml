@@ -56,6 +56,14 @@ logits_kd:
   warmup_epochs: 5
   confidence_threshold: 0.0
 
+rsd:
+  enable: true
+  source: projected
+  lambda_rsd: 0.001
+  kappa: 0.01
+  warmup_epochs: 5
+  reduction: sum
+
 train:
   epochs: 25
   batch_size: 8

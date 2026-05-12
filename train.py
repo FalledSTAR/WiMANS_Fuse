@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from datasets import ID_TO_ACTIVITY, WiMANSHARDataset, build_single_user_dataframe, build_single_user_label  # noqa: E402
-from losses import CAFDLoss, classification_loss, logits_kd_loss  # noqa: E402
+from losses import CAFDLoss, RSDLoss, classification_loss, logits_kd_loss  # noqa: E402
 from models import VideoWiFiCAFDModel, XFiWiFiStudent  # noqa: E402
 from utils import (  # noqa: E402
     accuracy_top1,
@@ -43,6 +43,9 @@ def parse_args():
     parser.add_argument("--lambda-logits", type=float, default=None)
     parser.add_argument("--kd-temperature", type=float, default=None)
     parser.add_argument("--kd-warmup-epochs", type=int, default=None)
+    parser.add_argument("--lambda-rsd", type=float, default=None)
+    parser.add_argument("--rsd-kappa", type=float, default=None)
+    parser.add_argument("--rsd-warmup-epochs", type=int, default=None)
     return parser.parse_args()
 
 
@@ -242,7 +245,35 @@ def effective_logits_kd_lambda(kd_cfg: dict, epoch: int) -> float:
     return target * min(max(int(epoch), 1) / warmup_epochs, 1.0)
 
 
-def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_loss_fn=None, logger=None, batch_csv_path=None):
+def get_rsd_cfg(cfg) -> dict:
+    rsd_cfg = cfg.get("rsd", {})
+    return {
+        "enabled": bool(rsd_cfg.get("enable", False)) and float(rsd_cfg.get("lambda_rsd", 0.0)) > 0,
+        "lambda_rsd": float(rsd_cfg.get("lambda_rsd", 0.0)),
+        "kappa": float(rsd_cfg.get("kappa", 0.01)),
+        "warmup_epochs": int(rsd_cfg.get("warmup_epochs", 0)),
+        "source": str(rsd_cfg.get("source", "projected")),
+        "reduction": str(rsd_cfg.get("reduction", "sum")),
+    }
+
+
+def effective_rsd_lambda(rsd_cfg: dict, epoch: int) -> float:
+    target = float(rsd_cfg["lambda_rsd"])
+    warmup_epochs = int(rsd_cfg.get("warmup_epochs", 0))
+    if not rsd_cfg["enabled"] or target <= 0:
+        return 0.0
+    if warmup_epochs <= 0:
+        return target
+    return target * min(max(int(epoch), 1) / warmup_epochs, 1.0)
+
+
+def select_rsd_pair(outputs: dict, source: str):
+    if source == "projected":
+        return outputs["wifi_projected"], outputs["video_projected"]
+    raise ValueError(f"Unsupported rsd.source: {source}")
+
+
+def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_loss_fn=None, rsd_loss_fn=None, logger=None, batch_csv_path=None):
     model.train()
     total_loss = 0.0
     total_correct = 0.0
@@ -251,6 +282,8 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
     log_interval = max(int(cfg["train"].get("log_interval", 50)), 1)
     kd_cfg = get_logits_kd_cfg(cfg)
     lambda_logits_effective = effective_logits_kd_lambda(kd_cfg, epoch)
+    rsd_cfg = get_rsd_cfg(cfg)
+    lambda_rsd_effective = effective_rsd_lambda(rsd_cfg, epoch)
     samples_seen = 0
     for batch_idx, batch in enumerate(loader, start=1):
         wifi = batch["wifi"].float().to(device)
@@ -272,6 +305,13 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             cafd_diagonal_gap_value = None
             cafd_relation_kl_value = None
             cafd_plain_mse_value = None
+            rsd_loss_value = None
+            rsd_weighted_value = None
+            lambda_rsd_value = None
+            rsd_invariance_value = None
+            rsd_decorrelation_value = None
+            rsd_diag_mean_value = None
+            rsd_offdiag_abs_mean_value = None
             teacher_acc_value = None
         else:
             video = batch["video"].float().to(device)
@@ -293,6 +333,12 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
                     confidence_threshold=kd_cfg["confidence_threshold"],
                 )
                 loss = loss + lambda_logits_effective * logits_kd_value
+            rsd_value = None
+            rsd_details = None
+            if rsd_loss_fn is not None and rsd_cfg["enabled"] and lambda_rsd_effective > 0:
+                student_rsd, teacher_rsd = select_rsd_pair(outputs, rsd_cfg["source"])
+                rsd_value, rsd_details = rsd_loss_fn(student_rsd, teacher_rsd, return_details=True)
+                loss = loss + lambda_rsd_effective * rsd_value
             cls_loss_value = float(cls_loss.item())
             cafd_loss_value = float(cafd_loss.item())
             logits_kd_loss_value = None if logits_kd_value is None else float(logits_kd_value.item())
@@ -303,6 +349,13 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             cafd_diagonal_gap_value = float(cafd_details["diagonal_gap"].item())
             cafd_relation_kl_value = float(cafd_details["relation_kl"].item())
             cafd_plain_mse_value = float(cafd_details["plain_mse"].item())
+            rsd_loss_value = None if rsd_value is None else float(rsd_value.item())
+            rsd_weighted_value = None if rsd_value is None else float((lambda_rsd_effective * rsd_value).item())
+            lambda_rsd_value = lambda_rsd_effective
+            rsd_invariance_value = None if rsd_details is None else float(rsd_details["invariance"].item())
+            rsd_decorrelation_value = None if rsd_details is None else float(rsd_details["decorrelation"].item())
+            rsd_diag_mean_value = None if rsd_details is None else float(rsd_details["diag_mean"].item())
+            rsd_offdiag_abs_mean_value = None if rsd_details is None else float(rsd_details["offdiag_abs_mean"].item())
             teacher_acc_value = accuracy_top1(outputs["teacher_logits"].detach(), labels.detach())
 
         loss.backward()
@@ -327,6 +380,13 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             "logits_kd_loss": logits_kd_loss_value,
             "logits_kd_weighted_loss": logits_kd_weighted_value,
             "lambda_logits_effective": lambda_logits_value,
+            "rsd_loss": rsd_loss_value,
+            "rsd_weighted_loss": rsd_weighted_value,
+            "lambda_rsd_effective": lambda_rsd_value,
+            "rsd_invariance": rsd_invariance_value,
+            "rsd_decorrelation": rsd_decorrelation_value,
+            "rsd_diag_mean": rsd_diag_mean_value,
+            "rsd_offdiag_abs_mean": rsd_offdiag_abs_mean_value,
             "teacher_accuracy": teacher_acc_value,
             "accuracy": batch_acc,
             "batch_size": int(labels.shape[0]),
@@ -335,7 +395,7 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
 
         if logger is not None and (batch_idx == 1 or batch_idx % log_interval == 0 or batch_idx == len(loader)):
             logger.info(
-                "train epoch=%s batch=%s/%s loss=%.6f cls_loss=%.6f cafd_loss=%s cafd_weighted_mse=%s cafd_correlation=%s cafd_diagonal_gap=%s cafd_relation_kl=%s cafd_plain_mse=%s logits_kd_loss=%s logits_kd_weighted=%s lambda_logits=%s teacher_acc=%s acc=%.6f",
+                "train epoch=%s batch=%s/%s loss=%.6f cls_loss=%.6f cafd_loss=%s cafd_weighted_mse=%s cafd_correlation=%s cafd_diagonal_gap=%s cafd_relation_kl=%s cafd_plain_mse=%s logits_kd_loss=%s logits_kd_weighted=%s lambda_logits=%s rsd_loss=%s rsd_weighted=%s lambda_rsd=%s rsd_diag_mean=%s rsd_offdiag_abs_mean=%s teacher_acc=%s acc=%.6f",
                 epoch,
                 batch_idx,
                 len(loader),
@@ -350,6 +410,11 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
                 "None" if row["logits_kd_loss"] is None else f"{row['logits_kd_loss']:.6f}",
                 "None" if row["logits_kd_weighted_loss"] is None else f"{row['logits_kd_weighted_loss']:.6f}",
                 "None" if row["lambda_logits_effective"] is None else f"{row['lambda_logits_effective']:.6f}",
+                "None" if row["rsd_loss"] is None else f"{row['rsd_loss']:.6f}",
+                "None" if row["rsd_weighted_loss"] is None else f"{row['rsd_weighted_loss']:.6f}",
+                "None" if row["lambda_rsd_effective"] is None else f"{row['lambda_rsd_effective']:.6f}",
+                "None" if row["rsd_diag_mean"] is None else f"{row['rsd_diag_mean']:.6f}",
+                "None" if row["rsd_offdiag_abs_mean"] is None else f"{row['rsd_offdiag_abs_mean']:.6f}",
                 "None" if row["teacher_accuracy"] is None else f"{row['teacher_accuracy']:.6f}",
                 row["accuracy"],
             )
@@ -373,6 +438,13 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
                 "logits_kd_loss",
                 "logits_kd_weighted_loss",
                 "lambda_logits_effective",
+                "rsd_loss",
+                "rsd_weighted_loss",
+                "lambda_rsd_effective",
+                "rsd_invariance",
+                "rsd_decorrelation",
+                "rsd_diag_mean",
+                "rsd_offdiag_abs_mean",
                 "teacher_accuracy",
                 "accuracy",
                 "batch_size",
@@ -500,6 +572,13 @@ def main():
         cfg.setdefault("logits_kd", {})["temperature"] = args.kd_temperature
     if args.kd_warmup_epochs is not None:
         cfg.setdefault("logits_kd", {})["warmup_epochs"] = args.kd_warmup_epochs
+    if args.lambda_rsd is not None:
+        cfg.setdefault("rsd", {})["lambda_rsd"] = args.lambda_rsd
+        cfg["rsd"]["enable"] = args.lambda_rsd > 0
+    if args.rsd_kappa is not None:
+        cfg.setdefault("rsd", {})["kappa"] = args.rsd_kappa
+    if args.rsd_warmup_epochs is not None:
+        cfg.setdefault("rsd", {})["warmup_epochs"] = args.rsd_warmup_epochs
     seed_everything(int(cfg["experiment"]["seed"]))
     device = select_device(cfg["train"]["device"])
 
@@ -548,12 +627,16 @@ def main():
 
     class_names = [ID_TO_ACTIVITY[class_id] for class_id in sorted(ID_TO_ACTIVITY)]
     kd_cfg = get_logits_kd_cfg(cfg)
+    rsd_cfg = get_rsd_cfg(cfg)
     if args.stage == "v0":
         model_name = "xfi_resnet18"
-    elif kd_cfg["enabled"]:
-        model_name = "xfi_resnet18_with_s3d_cafd_logit_kd"
     else:
-        model_name = "xfi_resnet18_with_s3d_cafd"
+        model_parts = ["xfi_resnet18", "s3d", "cafd"]
+        if kd_cfg["enabled"]:
+            model_parts.append("logit_kd")
+        if rsd_cfg["enabled"]:
+            model_parts.append("rsd")
+        model_name = "_with_".join(model_parts)
     result_payload = build_wimans_result_payload(
         model_name=model_name,
         task=f"{args.stage}_single_person_har",
@@ -566,6 +649,7 @@ def main():
     scheduler = build_scheduler(optimizer, cfg, logger=logger)
 
     cafd_loss_fn = None
+    rsd_loss_fn = None
     if args.stage == "v1":
         cafd_loss_fn = CAFDLoss(
             temperature=float(cfg["cafd"]["temperature"]),
@@ -594,6 +678,19 @@ def main():
             kd_cfg["warmup_epochs"],
             kd_cfg["confidence_threshold"],
         )
+        rsd_loss_fn = RSDLoss(
+            kappa=rsd_cfg["kappa"],
+            reduction=rsd_cfg["reduction"],
+        )
+        logger.info(
+            "rsd enabled=%s source=%s lambda=%.6f kappa=%.6f warmup_epochs=%d reduction=%s",
+            rsd_cfg["enabled"],
+            rsd_cfg["source"],
+            rsd_cfg["lambda_rsd"],
+            rsd_cfg["kappa"],
+            rsd_cfg["warmup_epochs"],
+            rsd_cfg["reduction"],
+        )
 
     best_acc = -1.0
     checkpoint_dir = run_dir / "checkpoints"
@@ -619,6 +716,7 @@ def main():
             cfg,
             epoch=epoch + 1,
             cafd_loss_fn=cafd_loss_fn,
+            rsd_loss_fn=rsd_loss_fn,
             logger=logger,
             batch_csv_path=run_dir / "metrics" / "train_batches.csv",
         )

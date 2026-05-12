@@ -131,15 +131,17 @@ python train.py --config config\config.yaml --stage v1
 ```
 
 The default V1 config now uses the trained teacher at
-`../backbone_models/video/video_s3d.pt` for two signals:
+`../backbone_models/video/video_s3d.pt` for three signals:
 
 - CMAD-style CAFD relation distillation with `cafd.lambda_cafd`.
 - Teacher-class probability distillation with `logits_kd.lambda_logits`, which is soft-label KD.
+- RSD feature redundancy suppression with `rsd.lambda_rsd`.
 
-For a CAFD-only ablation, set `logits_kd.lambda_logits: 0.0` in a copied config.
+For a CAFD-only ablation, set `logits_kd.lambda_logits: 0.0` and
+`rsd.lambda_rsd: 0.0` in a copied config.
 For a WiFi-only same-split ablation, run `--stage v0` with the same data section.
 For a logits-only ablation, set `cafd.lambda_cafd: 0.0` and keep
-`logits_kd.lambda_logits` enabled.
+`logits_kd.lambda_logits` enabled while setting `rsd.lambda_rsd: 0.0`.
 The default logits KD is intentionally conservative: `lambda_logits: 0.1` with
 `warmup_epochs: 5`. Earlier `lambda_logits: 0.5` runs made the weighted KD term
 much larger than CE and only improved best validation accuracy to about `0.375`.
@@ -147,17 +149,19 @@ much larger than CE and only improved best validation accuracy to about `0.375`.
 Useful 4080S ablation commands:
 
 ```powershell
-python train.py --config config\config.yaml --stage v1 --lambda-logits 0.1 --kd-warmup-epochs 5
-python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.1 --lambda-logits 0.1 --kd-warmup-epochs 5
-python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.1 --lambda-logits 0.0
-python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.0 --lambda-logits 0.1 --kd-warmup-epochs 5
+python train.py --config config\config.yaml --stage v1
+python train.py --config config\config.yaml --stage v1 --lambda-rsd 0.0
+python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.1 --lambda-logits 0.1 --lambda-rsd 0.001 --kd-warmup-epochs 5 --rsd-warmup-epochs 5
+python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.1 --lambda-logits 0.0 --lambda-rsd 0.001
+python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.0 --lambda-logits 0.1 --lambda-rsd 0.001 --kd-warmup-epochs 5
 ```
 
-Run the CMAD-style CAFD plus conservative logits KD first. If it improves,
-compare against CAFD-only to separate the effect of the relation distillation
-from the soft-label KD signal. If both remain far below the single-person HAR
-target, move next to a WiFi heatmap teacher instead of spending more time on
-component ablations.
+Run the default RSD-enabled V1 command first. The previous CMAD-style CAFD plus
+conservative logits KD run `20260511_144013` only reached `val_acc=0.324930`,
+so RSD is now the next bridge for cross-modal teacher-student representation
+alignment. If RSD remains far below the single-person HAR target, move next to a
+WiFi heatmap teacher instead of spending more time on CAFD-only component
+ablations.
 
 Laptop-sized V1 training check:
 
