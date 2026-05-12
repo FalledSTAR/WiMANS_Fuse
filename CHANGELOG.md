@@ -371,7 +371,7 @@ recorded here before moving the project to the 4080S machine.
 
 ## v0.1.16 - 2026-05-12
 
-- Implementation commit: `e78c353`
+- Implementation commit: `aaf6447`
 - Changes:
   - Changed the default V1 feature-distillation target from `video_projected` to the frozen S3D teacher raw `video_feature`.
   - Kept `video_projector` in `VideoWiFiCAFDModel`, but froze it by default with `projector.freeze_video_projector: true`.
