@@ -348,6 +348,27 @@ recorded here before moving the project to the 4080S machine.
   - CAFD finite/backward smoke check passed for `[8,256]` features.
   - Student features received gradients, teacher features stayed detached, and batch size 1 remained finite.
 
+## v0.1.15 - 2026-05-12
+
+- Implementation commit: `089118c`
+- Changes:
+  - Reviewed the latest interrupted CMAD-style CAFD run `20260511_144013`; best validation accuracy stayed at `0.324930` on epoch 15.
+  - Added Redundancy Suppression Distillation from `RSD-main` as a V1 feature-level loss.
+  - Added `losses/rsd_loss.py` with batch-normalized teacher-student cross-correlation, diagonal invariance maximization, and off-diagonal redundancy suppression.
+  - Added `rsd` config and CLI overrides: `--lambda-rsd`, `--rsd-kappa`, and `--rsd-warmup-epochs`.
+  - Added RSD raw/weighted loss and correlation diagnostics to `train.log` and `metrics/train_batches.csv`.
+- Problems found:
+  - The CMAD-style CAFD term remained small after `lambda_cafd=0.1`, while logits KD still dominated the extra supervision signal.
+  - RSD is a better match for the current cross-modal/cross-architecture mismatch because it suppresses architecture-exclusive redundant feature dimensions rather than only matching sample relations or class probabilities.
+- Validation commands:
+  - `python -m compileall train.py models utils losses datasets scripts`
+  - `python -c "import torch; from losses.rsd_loss import RSDLoss; ..."`
+- Validation result:
+  - Static compile passed.
+  - RSD finite/backward smoke check passed for `[8,256]` projected features.
+  - With random `[8,256]` features, raw RSD was about `395.59`, so default `lambda_rsd=0.001` contributes about `0.396` before warmup scaling.
+  - Teacher features stayed detached, student features received gradients, and batch size 1 returns a finite zero loss.
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.
