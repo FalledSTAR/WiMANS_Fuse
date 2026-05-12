@@ -123,6 +123,8 @@ def build_model(cfg, stage: str):
         projector_hidden_dim=cfg["projector"]["hidden_dim"],
         projector_out_dim=cfg["projector"]["out_dim"],
         projector_num_heads=cfg["projector"]["num_heads"],
+        projector_target=str(cfg["projector"].get("target", "video_feature")),
+        freeze_video_projector=bool(cfg["projector"].get("freeze_video_projector", True)),
     )
 
 
@@ -252,7 +254,7 @@ def get_rsd_cfg(cfg) -> dict:
         "lambda_rsd": float(rsd_cfg.get("lambda_rsd", 0.0)),
         "kappa": float(rsd_cfg.get("kappa", 0.01)),
         "warmup_epochs": int(rsd_cfg.get("warmup_epochs", 0)),
-        "source": str(rsd_cfg.get("source", "projected")),
+        "source": str(rsd_cfg.get("source", "distill")),
         "reduction": str(rsd_cfg.get("reduction", "sum")),
     }
 
@@ -268,6 +270,10 @@ def effective_rsd_lambda(rsd_cfg: dict, epoch: int) -> float:
 
 
 def select_rsd_pair(outputs: dict, source: str):
+    if source == "distill":
+        return outputs["wifi_distill_feature"], outputs["teacher_distill_feature"]
+    if source in {"video_feature", "teacher_feature"}:
+        return outputs["wifi_projected"], outputs["video_feature"]
     if source == "projected":
         return outputs["wifi_projected"], outputs["video_projected"]
     raise ValueError(f"Unsupported rsd.source: {source}")
@@ -319,8 +325,8 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             logits = outputs["logits"]
             cls_loss = classification_loss(logits, labels, "single_ce")
             cafd_loss, cafd_details = cafd_loss_fn(
-                outputs["wifi_projected"],
-                outputs["video_projected"],
+                outputs["wifi_distill_feature"],
+                outputs["teacher_distill_feature"],
                 return_details=True,
             )
             loss = cls_loss + float(cfg["cafd"]["lambda_cafd"]) * cafd_loss
@@ -614,6 +620,14 @@ def main():
         logger.info("loaded_video_teacher_checkpoint=%s", model.video_teacher.checkpoint_path)
         logger.info("video_teacher_checkpoint_extra=%s", model.video_teacher.checkpoint_extra)
         logger.info("video_teacher_checkpoint_load_info=%s", model.video_teacher.checkpoint_load_info)
+    if args.stage == "v1":
+        logger.info(
+            "projector target=%s freeze_video_projector=%s wifi_projector_out_dim=%d video_projector_trainable_params=%d",
+            getattr(model, "projector_target", "unknown"),
+            getattr(model, "freeze_video_projector", None),
+            model.wifi_projector.fc_out.out_features,
+            sum(p.numel() for p in model.video_projector.parameters() if p.requires_grad),
+        )
     model_text = str(model)
     (run_dir / "model.txt").write_text(model_text, encoding="utf-8")
     logger.info("model_structure:\n%s", model_text)

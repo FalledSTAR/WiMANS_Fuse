@@ -35,6 +35,8 @@ model:
 
 projector:
   enable: true
+  target: video_feature
+  freeze_video_projector: true
   hidden_dim: 256
   out_dim: 256
   num_heads: 2
@@ -58,7 +60,7 @@ logits_kd:
 
 rsd:
   enable: true
-  source: projected
+  source: distill
   lambda_rsd: 0.001
   kappa: 0.01
   warmup_epochs: 5
