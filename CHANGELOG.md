@@ -439,6 +439,32 @@ recorded here before moving the project to the 4080S machine.
   - Static compile passed.
   - Projector-teacher forward check returned logits shape `(2, 9)`, projected feature shape `(2, 256)`, base feature shape `(2, 1024)`, and finite logits.
 
+## v0.1.19 - 2026-05-13
+
+- Implementation commit: `dbe15aa`
+- Changes:
+  - Updated V1 projected-teacher distillation so `projector_target: projected` loads both trained `video_projector.*` and `projector_classifier.*` from the teacher checkpoint.
+  - When `projector.use_projector_logits: true`, logits KD now uses the trained projected-teacher classifier logits instead of the raw S3D classifier logits.
+  - Added a fail-fast check: `projector_target: projected` now raises an error if the checkpoint does not contain trained projector weights, and projected logits KD raises an error if the checkpoint does not contain `projector_classifier.*`.
+  - Kept `projector_classifier` frozen and in eval mode during V1 student training so dropout does not randomize teacher logits.
+  - Logged `projector_classifier_checkpoint_load_info`, `use_projector_logits`, and `teacher_logits_source` in `train.log`.
+  - Documented the projected-teacher command and shifted the next recommended run to CAFD-first, RSD-off: `--lambda-cafd 0.5 --lambda-logits 0.05 --lambda-rsd 0.0`.
+- Problems found:
+  - The copied run `20260513_150741` still peaked at only `val_acc=0.336134` on epoch 17, with epoch 19 at `val_acc=0.302521`.
+  - Its projected-feature run loaded `video_projector.*` correctly, but logits KD was still sourced from the raw S3D classifier, so feature and soft-label supervision came from different teacher heads.
+  - In epoch 17 and 19, `lambda_cafd=0.1` made CAFD contribute only about `0.054` weighted loss, while logits KD contributed about `0.83`; the relation feature signal was too small relative to soft logits KD.
+  - Best validation predictions were still biased toward `wave` and `nothing`: `wave=101` predictions and `nothing=66`, while `stand_up` class accuracy was only `0.10` and `lie_down` only `0.125`.
+  - The locally copied projector-teacher checkpoint files under `output/wimans_5g_single_video_teacher/20260513_113237/checkpoints/` could not be opened by `torch.load` (`PytorchStreamReader failed reading zip archive`), so they appear incomplete on this machine. Use the complete 4080S checkpoint for the next run.
+- Validation commands:
+  - `python -m compileall .\WiMANS_Baseline\models\video_wifi_cafd_model.py .\WiMANS_Baseline\train.py`
+  - `python -c "import sys, tempfile, pathlib, torch; ..."`
+  - `Import-Csv .\WiMANS_Baseline\output\wimans_5g_single_baseline\v1\20260513_150741\metrics\epochs.csv | Sort-Object @{Expression={[double]$_.val_acc};Descending=$true} | Select-Object -First 5`
+- Validation result:
+  - Static compile passed.
+  - Synthetic projector checkpoint load test returned `teacher_logits_source=projector_classifier`, `projector_load=12`, and `classifier_load=2`.
+  - `model.train()` keeps both frozen `video_projector` and `projector_classifier` in eval mode.
+  - Latest copied projected-teacher run analysis confirmed no meaningful improvement over the raw-feature CAFD range, so RSD should remain off for the next run until the projected teacher logits path is tested.
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.

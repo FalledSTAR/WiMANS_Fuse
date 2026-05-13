@@ -170,6 +170,13 @@ the stable S3D teacher feature. If this remains far below the single-person HAR
 target, move next to a WiFi heatmap teacher instead of spending more time on
 CAFD-only component ablations.
 
+For the supervised projected-video teacher route, use a checkpoint trained in
+`train_video_teacher.py --mode projector`. When `--projector-target projected`
+is selected, V1 now requires the checkpoint to contain trained
+`video_projector.*` weights. With `projector.use_projector_logits: true`, it
+also uses the trained `projector_classifier.*` logits for soft-label KD so the
+feature target and logits target come from the same projected teacher branch.
+
 Laptop-sized V1 training check:
 
 ```powershell
@@ -252,7 +259,7 @@ be copied into the external backbone folder and used directly by V1.
 To distill from the trained projected teacher space:
 
 ```powershell
-python train.py --config config\config.yaml --stage v1 --teacher-checkpoint ../backbone_models/video/video_projector_s3d.pt --projector-target projected --lambda-cafd 0.1 --lambda-logits 0.1 --lambda-rsd 0.0 --kd-warmup-epochs 5
+python train.py --config config\config.yaml --stage v1 --teacher-checkpoint ../backbone_models/video/video_projector_s3d.pt --projector-target projected --lambda-cafd 0.5 --lambda-logits 0.05 --lambda-rsd 0.0 --kd-warmup-epochs 5
 ```
 
 Use that checkpoint later as the visual teacher branch for the first distillation

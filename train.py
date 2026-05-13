@@ -126,6 +126,8 @@ def build_model(cfg, stage: str):
         projector_num_heads=cfg["projector"]["num_heads"],
         projector_target=str(cfg["projector"].get("target", "video_feature")),
         freeze_video_projector=bool(cfg["projector"].get("freeze_video_projector", True)),
+        use_projector_logits=bool(cfg["projector"].get("use_projector_logits", True)),
+        projector_dropout=float(cfg["projector"].get("dropout", 0.2)),
     )
 
 
@@ -624,11 +626,14 @@ def main():
         logger.info("video_teacher_checkpoint_extra=%s", model.video_teacher.checkpoint_extra)
         logger.info("video_teacher_checkpoint_load_info=%s", model.video_teacher.checkpoint_load_info)
         logger.info("video_projector_checkpoint_load_info=%s", model.video_projector_checkpoint_load_info)
+        logger.info("projector_classifier_checkpoint_load_info=%s", model.projector_classifier_checkpoint_load_info)
     if args.stage == "v1":
         logger.info(
-            "projector target=%s freeze_video_projector=%s wifi_projector_out_dim=%d video_projector_trainable_params=%d",
+            "projector target=%s freeze_video_projector=%s use_projector_logits=%s teacher_logits_source=%s wifi_projector_out_dim=%d video_projector_trainable_params=%d",
             getattr(model, "projector_target", "unknown"),
             getattr(model, "freeze_video_projector", None),
+            getattr(model, "use_projector_logits_requested", None),
+            getattr(model, "teacher_logits_source", "unknown"),
             model.wifi_projector.fc_out.out_features,
             sum(p.numel() for p in model.video_projector.parameters() if p.requires_grad),
         )
