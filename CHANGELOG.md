@@ -395,7 +395,7 @@ recorded here before moving the project to the 4080S machine.
 
 ## v0.1.17 - 2026-05-13
 
-- Implementation commit: `pending`
+- Implementation commit: `ed59583`
 - Changes:
   - Added `ProjectedVideoTeacherClassifier` for supervised video-projector teacher training.
   - Extended `train_video_teacher.py` with `video_teacher.mode: classifier/projector` and CLI overrides:
