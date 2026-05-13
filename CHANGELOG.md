@@ -425,7 +425,7 @@ recorded here before moving the project to the 4080S machine.
 
 ## v0.1.18 - 2026-05-13
 
-- Implementation commit: `pending`
+- Implementation commit: `7f366a5`
 - Changes:
   - Fixed S3D projector-teacher feature extraction in `VideoTeacherClassifier.forward`.
   - Classification-head input features with shape `[B,C,T,H,W]` are now mean-pooled over temporal/spatial dimensions to `[B,C]` before entering `video_projector`.
