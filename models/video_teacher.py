@@ -159,7 +159,9 @@ class VideoTeacherClassifier(nn.Module):
 
         def capture_head_input(_module, inputs):
             feature = inputs[0]
-            captured["feature"] = feature.flatten(1) if feature.ndim > 2 else feature
+            if feature.ndim > 2:
+                feature = feature.mean(dim=tuple(range(2, feature.ndim)))
+            captured["feature"] = feature
 
         handle = self.head_module.register_forward_pre_hook(capture_head_input) if return_features else None
         logits = self.model(video)

@@ -423,6 +423,22 @@ recorded here before moving the project to the 4080S machine.
   - Projector mode optimizer contained only the head group with `594697` trainable parameters; frozen video-teacher trainable parameters were `0`.
   - V1 projected-target load test loaded `12` video-projector keys and `464` S3D teacher keys from a temporary projector-teacher checkpoint.
 
+## v0.1.18 - 2026-05-13
+
+- Implementation commit: `pending`
+- Changes:
+  - Fixed S3D projector-teacher feature extraction in `VideoTeacherClassifier.forward`.
+  - Classification-head input features with shape `[B,C,T,H,W]` are now mean-pooled over temporal/spatial dimensions to `[B,C]` before entering `video_projector`.
+- Problems found:
+  - Projector-teacher training crashed with `RuntimeError: mat1 and mat2 shapes cannot be multiplied (4x10240 and 1024x256)`.
+  - The hook captured the S3D classifier input and flattened all non-batch dimensions, producing `10240`-d features instead of the intended `1024`-d pooled S3D feature.
+- Validation commands:
+  - `python -m compileall models/video_teacher.py train_video_teacher.py`
+  - `python -c "import yaml, torch, train_video_teacher as tv; ..."`
+- Validation result:
+  - Static compile passed.
+  - Projector-teacher forward check returned logits shape `(2, 9)`, projected feature shape `(2, 256)`, base feature shape `(2, 1024)`, and finite logits.
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.
