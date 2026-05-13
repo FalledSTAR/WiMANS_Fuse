@@ -13,7 +13,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from datasets import ID_TO_ACTIVITY, WiMANSHARDataset, build_single_user_dataframe, build_single_user_label  # noqa: E402
 from losses import classification_loss  # noqa: E402
-from models.video_teacher import VideoTeacherClassifier, build_video_transform, normalize_video_backbone_name  # noqa: E402
+from models.video_teacher import (  # noqa: E402
+    ProjectedVideoTeacherClassifier,
+    VideoTeacherClassifier,
+    build_video_transform,
+    normalize_video_backbone_name,
+)
 from utils import (  # noqa: E402
     accuracy_top1,
     append_csv_rows,
@@ -37,6 +42,11 @@ def parse_args():
     parser.add_argument("--config", default=str(PROJECT_ROOT / "config" / "video_teacher.yaml"))
     parser.add_argument("--backbone", "--model", dest="backbone", default=None)
     parser.add_argument("--weights", default=None)
+    parser.add_argument("--mode", choices=["classifier", "projector"], default=None)
+    parser.add_argument("--checkpoint", default=None)
+    parser.add_argument("--projector-hidden-dim", type=int, default=None)
+    parser.add_argument("--projector-out-dim", type=int, default=None)
+    parser.add_argument("--projector-num-heads", type=int, default=None)
     parser.add_argument("--sample-limit", type=int, default=None)
     parser.add_argument("--num-frames", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=None)
@@ -59,6 +69,16 @@ def apply_overrides(cfg, args):
         cfg["video_teacher"]["backbone"] = args.backbone
     if args.weights is not None:
         cfg["video_teacher"]["weights"] = args.weights
+    if args.mode is not None:
+        cfg["video_teacher"]["mode"] = args.mode
+    if args.checkpoint is not None:
+        cfg["video_teacher"]["checkpoint"] = args.checkpoint
+    if args.projector_hidden_dim is not None:
+        cfg.setdefault("video_projector", {})["hidden_dim"] = args.projector_hidden_dim
+    if args.projector_out_dim is not None:
+        cfg.setdefault("video_projector", {})["out_dim"] = args.projector_out_dim
+    if args.projector_num_heads is not None:
+        cfg.setdefault("video_projector", {})["num_heads"] = args.projector_num_heads
     if args.sample_limit is not None:
         cfg["data"]["sample_limit"] = args.sample_limit
     if args.num_frames is not None:
@@ -130,6 +150,25 @@ def build_loaders(cfg):
 
 
 def build_model(cfg):
+    mode = str(cfg["video_teacher"].get("mode", "classifier")).lower()
+    if mode == "projector":
+        checkpoint = cfg["video_teacher"].get("checkpoint")
+        if checkpoint is None:
+            raise ValueError("video_teacher.checkpoint is required when video_teacher.mode is 'projector'")
+        projector_cfg = cfg.get("video_projector", {})
+        return ProjectedVideoTeacherClassifier(
+            backbone=cfg["video_teacher"]["backbone"],
+            weights=cfg["video_teacher"]["weights"],
+            checkpoint_path=str(resolve_path(PROJECT_ROOT, checkpoint)),
+            num_classes=int(cfg["video_teacher"]["num_classes"]),
+            freeze_video_teacher=bool(cfg["video_teacher"].get("freeze_video_teacher", True)),
+            projector_hidden_dim=int(projector_cfg.get("hidden_dim", 256)),
+            projector_out_dim=int(projector_cfg.get("out_dim", 256)),
+            projector_num_heads=int(projector_cfg.get("num_heads", 2)),
+            dropout=float(cfg["video_teacher"]["dropout"]),
+        )
+    if mode != "classifier":
+        raise ValueError("video_teacher.mode must be 'classifier' or 'projector'")
     return VideoTeacherClassifier(
         backbone=cfg["video_teacher"]["backbone"],
         weights=cfg["video_teacher"]["weights"],
@@ -220,6 +259,10 @@ def write_top_checkpoint_manifest(checkpoint_dir: Path, top_checkpoints):
 def build_video_model_summary(model, cfg):
     summary = {
         "backbone": normalize_video_backbone_name(cfg["video_teacher"]["backbone"]),
+        "mode": str(cfg["video_teacher"].get("mode", "classifier")),
+        "feature_dim": getattr(model, "feature_dim", None),
+        "base_feature_dim": getattr(model, "base_feature_dim", None),
+        "projector_out_dim": getattr(model, "projector_out_dim", None),
         "parameters": count_parameters(model),
         "flops": {"available": False, "error": "disabled by config"},
     }
@@ -406,6 +449,10 @@ def main():
     )
 
     model = build_model(cfg)
+    if str(cfg["video_teacher"].get("mode", "classifier")).lower() == "projector":
+        logger.info("loaded_base_video_checkpoint=%s", model.checkpoint_path)
+        logger.info("base_video_checkpoint_extra=%s", model.checkpoint_extra)
+        logger.info("base_video_checkpoint_load_info=%s", model.checkpoint_load_info)
     (run_dir / "model.txt").write_text(str(model), encoding="utf-8")
     logger.info("model_structure:\n%s", model)
     summary = build_video_model_summary(model, cfg)
@@ -415,8 +462,8 @@ def main():
 
     class_names = [ID_TO_ACTIVITY[class_id] for class_id in sorted(ID_TO_ACTIVITY)]
     result_payload = build_wimans_result_payload(
-        model_name=normalize_video_backbone_name(cfg["video_teacher"]["backbone"]),
-        task="single_person_video_teacher",
+        model_name=f"{normalize_video_backbone_name(cfg['video_teacher']['backbone'])}_{cfg['video_teacher'].get('mode', 'classifier')}",
+        task=f"single_person_video_teacher_{cfg['video_teacher'].get('mode', 'classifier')}",
         cfg=cfg,
         model_summary=summary,
     )
@@ -516,9 +563,11 @@ def main():
                     "epoch": epoch,
                     "val_acc": float(val_acc),
                     "val_loss": float(val_loss),
-                    "model_type": "video_teacher",
+                    "model_type": f"video_teacher_{cfg['video_teacher'].get('mode', 'classifier')}",
                     "backbone": normalize_video_backbone_name(cfg["video_teacher"]["backbone"]),
                     "feature_dim": model.feature_dim,
+                    "base_feature_dim": getattr(model, "base_feature_dim", None),
+                    "projector_out_dim": getattr(model, "projector_out_dim", None),
                     "num_classes": int(cfg["video_teacher"]["num_classes"]),
                 },
             )
@@ -559,9 +608,11 @@ def main():
                         "epoch": epoch,
                         "val_acc": float(val_acc),
                         "val_loss": float(val_loss),
-                        "model_type": "video_teacher",
+                        "model_type": f"video_teacher_{cfg['video_teacher'].get('mode', 'classifier')}",
                         "backbone": normalize_video_backbone_name(cfg["video_teacher"]["backbone"]),
                         "feature_dim": model.feature_dim,
+                        "base_feature_dim": getattr(model, "base_feature_dim", None),
+                        "projector_out_dim": getattr(model, "projector_out_dim", None),
                         "num_classes": int(cfg["video_teacher"]["num_classes"]),
                     },
                 )

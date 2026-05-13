@@ -52,9 +52,18 @@ class S3DTeacher(nn.Module):
         target_state = {}
         skipped = []
         for key, value in source_state.items():
+            if key.startswith("video_teacher.model."):
+                key = key[len("video_teacher.model."):]
             if key.startswith("model."):
                 key = key[len("model."):]
-            if key.startswith("head_module.") or key.startswith("head_root."):
+            if (
+                key.startswith("video_teacher.head_module.")
+                or key.startswith("video_teacher.head_root.")
+                or key.startswith("head_module.")
+                or key.startswith("head_root.")
+                or key.startswith("video_projector.")
+                or key.startswith("projector_classifier.")
+            ):
                 continue
             if key not in current_state:
                 skipped.append({"key": key, "reason": "not_in_target"})
