@@ -238,6 +238,23 @@ Video-teacher training also keeps the top 3 validation checkpoint weight files.
 Filenames include epoch, validation accuracy, and validation loss, with
 `top_k_checkpoints.csv` recording their ranking.
 
+Projected video teacher:
+
+```powershell
+python train_video_teacher.py --config config\video_teacher.yaml --mode projector --checkpoint ../backbone_models/video/video_s3d.pt --weights none --epochs 20 --batch-size 4 --grad-accum-steps 4 --projector-out-dim 256
+```
+
+This loads the trained S3D teacher checkpoint, freezes the video teacher, and
+trains only `video_projector + projector_classifier`. The saved checkpoint keeps
+both the frozen S3D weights and the trained `video_projector` weights, so it can
+be copied into the external backbone folder and used directly by V1.
+
+To distill from the trained projected teacher space:
+
+```powershell
+python train.py --config config\config.yaml --stage v1 --teacher-checkpoint ../backbone_models/video/video_projector_s3d.pt --projector-target projected --lambda-cafd 0.1 --lambda-logits 0.1 --lambda-rsd 0.0 --kd-warmup-epochs 5
+```
+
 Use that checkpoint later as the visual teacher branch for the first distillation
 experiment. Keep `--weights none` only for smoke tests; real teacher training should
 use `weights: kinetics400`.

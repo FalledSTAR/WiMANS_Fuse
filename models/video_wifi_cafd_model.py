@@ -46,10 +46,48 @@ class VideoWiFiCAFDModel(nn.Module):
             out_dim=projector_out_dim,
             num_heads=projector_num_heads,
         )
+        self.video_projector_checkpoint_load_info = None
+        if teacher_checkpoint_path is not None:
+            self.video_projector_checkpoint_load_info = self._load_video_projector_checkpoint(teacher_checkpoint_path)
         self.freeze_video_projector = freeze_video_projector
         if self.freeze_video_projector:
             for parameter in self.video_projector.parameters():
                 parameter.requires_grad = False
+
+    def _load_video_projector_checkpoint(self, checkpoint_path: str):
+        payload = torch.load(checkpoint_path, map_location="cpu")
+        source_state = payload.get("model", payload)
+        current_state = self.video_projector.state_dict()
+        target_state = {}
+        skipped = []
+        for key, value in source_state.items():
+            if key.startswith("video_projector."):
+                key = key[len("video_projector."):]
+            elif key.startswith("projector."):
+                key = key[len("projector."):]
+            else:
+                continue
+            if key not in current_state:
+                skipped.append({"key": key, "reason": "not_in_target"})
+                continue
+            if tuple(current_state[key].shape) != tuple(value.shape):
+                skipped.append(
+                    {
+                        "key": key,
+                        "reason": "shape_mismatch",
+                        "source_shape": tuple(value.shape),
+                        "target_shape": tuple(current_state[key].shape),
+                    }
+                )
+                continue
+            target_state[key] = value
+        load_result = self.video_projector.load_state_dict(target_state, strict=False)
+        return {
+            "missing_keys": list(load_result.missing_keys),
+            "unexpected_keys": list(load_result.unexpected_keys),
+            "loaded_keys": len(target_state),
+            "skipped_keys": skipped,
+        }
 
     def forward(self, wifi, video):
         wifi_out = self.wifi_student(wifi, return_features=True)

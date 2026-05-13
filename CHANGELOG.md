@@ -393,6 +393,36 @@ recorded here before moving the project to the 4080S machine.
   - Student features received gradients, teacher features stayed detached, and batch size 1 RSD returned a finite zero loss.
   - Default V1 model construction check returned `projector_target=video_feature`, WiFi projector output dimension `1024`, and `video_trainable=0`.
 
+## v0.1.17 - 2026-05-13
+
+- Implementation commit: `ed59583`
+- Changes:
+  - Added `ProjectedVideoTeacherClassifier` for supervised video-projector teacher training.
+  - Extended `train_video_teacher.py` with `video_teacher.mode: classifier/projector` and CLI overrides:
+    - `--mode projector`
+    - `--checkpoint`
+    - `--projector-hidden-dim`
+    - `--projector-out-dim`
+    - `--projector-num-heads`
+  - Projector mode loads a trained video checkpoint, freezes the video teacher, and trains only `video_projector + projector_classifier`.
+  - Saved projector-teacher checkpoints include both frozen video-teacher weights and trained `video_projector` weights.
+  - Updated V1 loading so `VideoWiFiCAFDModel` can load `video_projector.*` from the same teacher checkpoint used by `S3DTeacher`.
+  - Added `--projector-target` to `train.py` so projected-teacher distillation can be selected from the command line.
+  - Updated README with projector-teacher training and projected-feature distillation commands.
+- Problems found:
+  - Direct alignment to raw S3D `video_feature` stayed near the low `0.3` validation-accuracy range.
+  - The original S3D teacher checkpoint does not contain a trained projector, so `video_projector` must first be trained with video labels before being used as a stable teacher feature space.
+  - Simply unfreezing `video_projector` inside WiFi distillation would not update it under the current CAFD/RSD losses because teacher-side features are detached.
+- Validation commands:
+  - `python -m compileall train.py train_video_teacher.py models utils losses datasets scripts`
+  - `python -c "import yaml, train_video_teacher as tv; ..."`
+  - `python -c "import yaml, torch, train, train_video_teacher as tv; ..."`
+- Validation result:
+  - Static compile passed.
+  - Projector mode instantiated from `../backbone_models/video/video_s3d.pt` with `base_feature_dim=1024`, `projector_out_dim=256`, and `feature_dim=256`.
+  - Projector mode optimizer contained only the head group with `594697` trainable parameters; frozen video-teacher trainable parameters were `0`.
+  - V1 projected-target load test loaded `12` video-projector keys and `464` S3D teacher keys from a temporary projector-teacher checkpoint.
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.

@@ -39,6 +39,7 @@ def parse_args():
     parser.add_argument("--num-frames", type=int, default=None)
     parser.add_argument("--s3d-weights", default=None)
     parser.add_argument("--teacher-checkpoint", default=None)
+    parser.add_argument("--projector-target", choices=["video_feature", "projected"], default=None)
     parser.add_argument("--lambda-cafd", type=float, default=None)
     parser.add_argument("--lambda-logits", type=float, default=None)
     parser.add_argument("--kd-temperature", type=float, default=None)
@@ -569,6 +570,8 @@ def main():
         cfg["video"]["s3d_weights"] = args.s3d_weights
     if args.teacher_checkpoint is not None:
         cfg["video"]["teacher_checkpoint"] = args.teacher_checkpoint
+    if args.projector_target is not None:
+        cfg.setdefault("projector", {})["target"] = args.projector_target
     if args.lambda_cafd is not None:
         cfg.setdefault("cafd", {})["lambda_cafd"] = args.lambda_cafd
     if args.lambda_logits is not None:
@@ -620,6 +623,7 @@ def main():
         logger.info("loaded_video_teacher_checkpoint=%s", model.video_teacher.checkpoint_path)
         logger.info("video_teacher_checkpoint_extra=%s", model.video_teacher.checkpoint_extra)
         logger.info("video_teacher_checkpoint_load_info=%s", model.video_teacher.checkpoint_load_info)
+        logger.info("video_projector_checkpoint_load_info=%s", model.video_projector_checkpoint_load_info)
     if args.stage == "v1":
         logger.info(
             "projector target=%s freeze_video_projector=%s wifi_projector_out_dim=%d video_projector_trainable_params=%d",

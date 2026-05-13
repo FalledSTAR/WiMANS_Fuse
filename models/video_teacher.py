@@ -21,6 +21,8 @@ from torchvision.models.video import (
     swin3d_t,
 )
 
+from .hybrid_projector import HybridProjector
+
 
 VIDEO_BACKBONES = {
     "s3d": (s3d, S3D_Weights),
@@ -172,6 +174,101 @@ class VideoTeacherClassifier(nn.Module):
         super().train(mode)
         if self.freeze_backbone:
             self._set_backbone_eval()
+        return self
+
+
+def load_video_teacher_checkpoint(model: nn.Module, checkpoint_path: str):
+    payload = torch.load(checkpoint_path, map_location="cpu")
+    source_state = payload.get("model", payload)
+    normalized_state = {}
+    for key, value in source_state.items():
+        normalized_key = key
+        if normalized_key.startswith("video_teacher."):
+            normalized_key = normalized_key[len("video_teacher."):]
+        normalized_state[normalized_key] = value
+    load_result = model.load_state_dict(normalized_state, strict=False)
+    return payload.get("extra", {}), {
+        "missing_keys": list(load_result.missing_keys),
+        "unexpected_keys": list(load_result.unexpected_keys),
+        "loaded_keys": len(normalized_state),
+    }
+
+
+class ProjectedVideoTeacherClassifier(nn.Module):
+    def __init__(
+        self,
+        backbone: str = "s3d",
+        num_classes: int = 9,
+        weights: str = "kinetics400",
+        checkpoint_path: str = None,
+        freeze_video_teacher: bool = True,
+        projector_hidden_dim: int = 256,
+        projector_out_dim: int = 256,
+        projector_num_heads: int = 2,
+        dropout: float = 0.2,
+    ):
+        super().__init__()
+        if checkpoint_path is None:
+            raise ValueError("ProjectedVideoTeacherClassifier requires a trained video checkpoint_path")
+
+        self.video_teacher = VideoTeacherClassifier(
+            backbone=backbone,
+            weights=weights,
+            num_classes=num_classes,
+            freeze_backbone=freeze_video_teacher,
+            dropout=dropout,
+        )
+        self.checkpoint_path = checkpoint_path
+        self.checkpoint_extra, self.checkpoint_load_info = load_video_teacher_checkpoint(
+            self.video_teacher,
+            checkpoint_path,
+        )
+        self.freeze_video_teacher = freeze_video_teacher
+        if self.freeze_video_teacher:
+            for parameter in self.video_teacher.parameters():
+                parameter.requires_grad = False
+            self.video_teacher.eval()
+
+        self.base_feature_dim = self.video_teacher.feature_dim
+        self.projector_out_dim = int(projector_out_dim)
+        self.feature_dim = self.projector_out_dim
+        self.video_projector = HybridProjector(
+            in_dim=self.base_feature_dim,
+            hidden_dim=int(projector_hidden_dim),
+            out_dim=self.projector_out_dim,
+            num_heads=int(projector_num_heads),
+        )
+        self.projector_classifier = nn.Sequential(
+            nn.Dropout(p=dropout),
+            nn.Linear(self.projector_out_dim, num_classes),
+        )
+
+    def head_parameters(self):
+        return list(self.video_projector.parameters()) + list(self.projector_classifier.parameters())
+
+    def backbone_parameters(self):
+        return list(self.video_teacher.parameters())
+
+    def forward(self, video: torch.Tensor, return_features: bool = False):
+        context = torch.no_grad() if self.freeze_video_teacher else torch.enable_grad()
+        with context:
+            teacher_out = self.video_teacher(video, return_features=True)
+            base_feature = teacher_out["feature"]
+        projected_feature = self.video_projector(base_feature)
+        logits = self.projector_classifier(projected_feature)
+        if return_features:
+            return {
+                "logits": logits,
+                "feature": projected_feature,
+                "base_feature": base_feature,
+                "base_logits": teacher_out["logits"],
+            }
+        return logits
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.freeze_video_teacher:
+            self.video_teacher.eval()
         return self
 
 
