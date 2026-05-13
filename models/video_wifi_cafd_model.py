@@ -19,11 +19,14 @@ class VideoWiFiCAFDModel(nn.Module):
         projector_num_heads: int = 2,
         projector_target: str = "video_feature",
         freeze_video_projector: bool = True,
+        use_projector_logits: bool = True,
+        projector_dropout: float = 0.2,
     ):
         super().__init__()
         if projector_target not in {"video_feature", "projected"}:
             raise ValueError("projector_target must be 'video_feature' or 'projected'")
         self.projector_target = projector_target
+        self.use_projector_logits_requested = bool(use_projector_logits)
         self.wifi_student = XFiWiFiStudent(weight_path=xfi_weight_path, num_classes=num_classes)
         self.video_teacher = S3DTeacher(
             weights=s3d_weights,
@@ -46,13 +49,45 @@ class VideoWiFiCAFDModel(nn.Module):
             out_dim=projector_out_dim,
             num_heads=projector_num_heads,
         )
+        self.projector_classifier = nn.Sequential(
+            nn.Dropout(p=float(projector_dropout)),
+            nn.Linear(projector_out_dim, num_classes),
+        )
         self.video_projector_checkpoint_load_info = None
+        self.projector_classifier_checkpoint_load_info = None
+        self.projector_classifier_available = False
         if teacher_checkpoint_path is not None:
             self.video_projector_checkpoint_load_info = self._load_video_projector_checkpoint(teacher_checkpoint_path)
+            self.projector_classifier_checkpoint_load_info = self._load_projector_classifier_checkpoint(
+                teacher_checkpoint_path
+            )
+            self.projector_classifier_available = self.projector_classifier_checkpoint_load_info["loaded_keys"] > 0
+        if self.projector_target == "projected":
+            projector_loaded_keys = (
+                0
+                if self.video_projector_checkpoint_load_info is None
+                else int(self.video_projector_checkpoint_load_info["loaded_keys"])
+            )
+            if projector_loaded_keys == 0:
+                raise ValueError(
+                    "projector_target='projected' requires a teacher checkpoint with video_projector.* weights"
+                )
+            if self.use_projector_logits_requested and not self.projector_classifier_available:
+                raise ValueError(
+                    "use_projector_logits=True requires a teacher checkpoint with projector_classifier.* weights"
+                )
         self.freeze_video_projector = freeze_video_projector
         if self.freeze_video_projector:
             for parameter in self.video_projector.parameters():
                 parameter.requires_grad = False
+        for parameter in self.projector_classifier.parameters():
+            parameter.requires_grad = False
+        self.projector_classifier.eval()
+        self.teacher_logits_source = (
+            "projector_classifier"
+            if self._should_use_projector_logits()
+            else "s3d_classifier"
+        )
 
     def _load_video_projector_checkpoint(self, checkpoint_path: str):
         payload = torch.load(checkpoint_path, map_location="cpu")
@@ -89,6 +124,46 @@ class VideoWiFiCAFDModel(nn.Module):
             "skipped_keys": skipped,
         }
 
+    def _load_projector_classifier_checkpoint(self, checkpoint_path: str):
+        payload = torch.load(checkpoint_path, map_location="cpu")
+        source_state = payload.get("model", payload)
+        current_state = self.projector_classifier.state_dict()
+        target_state = {}
+        skipped = []
+        for key, value in source_state.items():
+            if key.startswith("projector_classifier."):
+                key = key[len("projector_classifier."):]
+            else:
+                continue
+            if key not in current_state:
+                skipped.append({"key": key, "reason": "not_in_target"})
+                continue
+            if tuple(current_state[key].shape) != tuple(value.shape):
+                skipped.append(
+                    {
+                        "key": key,
+                        "reason": "shape_mismatch",
+                        "source_shape": tuple(value.shape),
+                        "target_shape": tuple(current_state[key].shape),
+                    }
+                )
+                continue
+            target_state[key] = value
+        load_result = self.projector_classifier.load_state_dict(target_state, strict=False)
+        return {
+            "missing_keys": list(load_result.missing_keys),
+            "unexpected_keys": list(load_result.unexpected_keys),
+            "loaded_keys": len(target_state),
+            "skipped_keys": skipped,
+        }
+
+    def _should_use_projector_logits(self) -> bool:
+        return (
+            self.projector_target == "projected"
+            and self.use_projector_logits_requested
+            and self.projector_classifier_available
+        )
+
     def forward(self, wifi, video):
         wifi_out = self.wifi_student(wifi, return_features=True)
         video_out = self.video_teacher(video, return_logits=True)
@@ -103,9 +178,18 @@ class VideoWiFiCAFDModel(nn.Module):
             teacher_distill_feature = video_feature
         else:
             teacher_distill_feature = video_projected
+        projector_logits = None
+        teacher_logits = video_out["logits"]
+        if self._should_use_projector_logits():
+            with torch.no_grad():
+                projector_logits = self.projector_classifier(video_projected)
+            teacher_logits = projector_logits
         return {
             "logits": wifi_out["logits"],
-            "teacher_logits": video_out["logits"],
+            "teacher_logits": teacher_logits,
+            "s3d_logits": video_out["logits"],
+            "projector_logits": projector_logits,
+            "teacher_logits_source": self.teacher_logits_source,
             "wifi_feature": wifi_out["feature"],
             "video_feature": video_feature,
             "wifi_projected": wifi_projected,
@@ -113,3 +197,10 @@ class VideoWiFiCAFDModel(nn.Module):
             "wifi_distill_feature": wifi_projected,
             "teacher_distill_feature": teacher_distill_feature,
         }
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.freeze_video_projector:
+            self.video_projector.eval()
+        self.projector_classifier.eval()
+        return self

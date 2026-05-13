@@ -37,9 +37,11 @@ projector:
   enable: true
   target: video_feature
   freeze_video_projector: true
+  use_projector_logits: true
   hidden_dim: 256
   out_dim: 256
   num_heads: 2
+  dropout: 0.2
 
 cafd:
   enable: true
