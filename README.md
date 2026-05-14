@@ -131,11 +131,11 @@ python train.py --config config\config.yaml --stage v1
 ```
 
 The default V1 config now uses the trained teacher at
-`../backbone_models/video/video_s3d.pt` for three signals:
+`../backbone_models/video/video_s3d.pt` for the CAFD feature-relation signal:
 
 - CMAD-style CAFD relation distillation with `cafd.lambda_cafd`.
-- Teacher-class probability distillation with `logits_kd.lambda_logits`, which is soft-label KD.
-- RSD feature redundancy suppression with `rsd.lambda_rsd`.
+- Teacher-class probability distillation with `logits_kd.lambda_logits` is kept as an optional soft-label KD ablation.
+- RSD feature redundancy suppression with `rsd.lambda_rsd` is kept as an optional feature-correlation ablation.
 
 The current default feature target is `projector.target: video_feature`.
 This keeps the trained S3D teacher frozen and maps the WiFi student feature into
@@ -143,8 +143,10 @@ the raw S3D 1024-d feature space. The retained `video_projector` is frozen by
 default through `projector.freeze_video_projector: true` and is not used as the
 CAFD/RSD teacher target in this experiment.
 
-For a CAFD-only ablation, set `logits_kd.lambda_logits: 0.0` and
-`rsd.lambda_rsd: 0.0` in a copied config.
+The current default is CAFD-only: `logits_kd.lambda_logits: 0.0` and
+`rsd.lambda_rsd: 0.0`. This avoids mixing category-distribution KD with CAFD
+while checking whether the paper-style CAFD feature relation loss can improve
+the X-Fi ResNet-18 WiFi student by itself.
 For a WiFi-only same-split ablation, run `--stage v0` with the same data section.
 For a logits-only ablation, set `cafd.lambda_cafd: 0.0` and keep
 `logits_kd.lambda_logits` enabled while setting `rsd.lambda_rsd: 0.0`.
@@ -156,13 +158,12 @@ Useful 4080S ablation commands:
 
 ```powershell
 python train.py --config config\config.yaml --stage v1
-python train.py --config config\config.yaml --stage v1 --lambda-rsd 0.0
-python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.1 --lambda-logits 0.1 --lambda-rsd 0.001 --kd-warmup-epochs 5 --rsd-warmup-epochs 5
-python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.1 --lambda-logits 0.0 --lambda-rsd 0.001
-python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.0 --lambda-logits 0.1 --lambda-rsd 0.001 --kd-warmup-epochs 5
+python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.5 --lambda-logits 0.0 --lambda-rsd 0.0
+python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.5 --lambda-logits 0.05 --lambda-rsd 0.0 --kd-warmup-epochs 5
+python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.5 --lambda-logits 0.0 --lambda-rsd 0.0001 --rsd-warmup-epochs 5
 ```
 
-Run the default RSD-enabled V1 command first. The earlier projected-target run
+Run the default CAFD-only V1 command first. The earlier projected-target run
 `20260512_095804` still improved slowly and only approached the low `0.3` range,
 because CAFD/RSD were aligned to `video_projected`, a retained but untrained
 video projection head. The current default instead aligns the WiFi student to
@@ -259,7 +260,7 @@ be copied into the external backbone folder and used directly by V1.
 To distill from the trained projected teacher space:
 
 ```powershell
-python train.py --config config\config.yaml --stage v1 --teacher-checkpoint ../backbone_models/video/video_projector_s3d.pt --projector-target projected --lambda-cafd 0.5 --lambda-logits 0.05 --lambda-rsd 0.0 --kd-warmup-epochs 5
+python train.py --config config\config.yaml --stage v1 --teacher-checkpoint ../backbone_models/video/video_projector_s3d.pt --projector-target projected --lambda-cafd 0.5 --lambda-logits 0.0 --lambda-rsd 0.0
 ```
 
 Use that checkpoint later as the visual teacher branch for the first distillation
