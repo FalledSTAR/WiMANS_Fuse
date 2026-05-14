@@ -71,8 +71,6 @@ def main():
     )
     cafd_loss_fn = CAFDLoss(
         temperature=float(cfg["cafd"]["temperature"]),
-        alpha=float(cfg["cafd"]["alpha"]),
-        beta=float(cfg["cafd"]["beta"]),
     )
 
     wifi = batch["wifi"].float().to(device)

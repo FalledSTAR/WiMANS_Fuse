@@ -46,12 +46,7 @@ projector:
 cafd:
   enable: true
   temperature: 0.1
-  alpha: 1.0
-  beta: 0.5
-  gamma: 1.0
   lambda_cafd: 0.5
-  use_weighted_mse: true
-  use_correlation: true
 
 logits_kd:
   enable: false

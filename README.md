@@ -147,6 +147,9 @@ The current default is CAFD-only: `logits_kd.lambda_logits: 0.0` and
 `rsd.lambda_rsd: 0.0`. This avoids mixing category-distribution KD with CAFD
 while checking whether the paper-style CAFD feature relation loss can improve
 the X-Fi ResNet-18 WiFi student by itself.
+The CAFD loss follows the original formula used here for diagnosis:
+`loss = weighted_mse + diagonal_gap`. It does not use the extra
+student-student correlation branch or internal `alpha/beta/gamma` weights.
 For a WiFi-only same-split ablation, run `--stage v0` with the same data section.
 For a logits-only ablation, set `cafd.lambda_cafd: 0.0` and keep
 `logits_kd.lambda_logits` enabled while setting `rsd.lambda_rsd: 0.0`.
