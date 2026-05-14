@@ -46,24 +46,19 @@ projector:
 cafd:
   enable: true
   temperature: 0.1
-  alpha: 1.0
-  beta: 0.5
-  gamma: 1.0
-  lambda_cafd: 0.1
-  use_weighted_mse: true
-  use_correlation: true
+  lambda_cafd: 0.5
 
 logits_kd:
-  enable: true
+  enable: false
   temperature: 4.0
-  lambda_logits: 0.1
+  lambda_logits: 0.0
   warmup_epochs: 5
   confidence_threshold: 0.0
 
 rsd:
-  enable: true
+  enable: false
   source: distill
-  lambda_rsd: 0.001
+  lambda_rsd: 0.0
   kappa: 0.01
   warmup_epochs: 5
   reduction: sum

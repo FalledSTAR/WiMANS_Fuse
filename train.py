@@ -676,22 +676,12 @@ def main():
     if args.stage == "v1":
         cafd_loss_fn = CAFDLoss(
             temperature=float(cfg["cafd"]["temperature"]),
-            alpha=float(cfg["cafd"]["alpha"]),
-            beta=float(cfg["cafd"]["beta"]),
-            gamma=float(cfg["cafd"].get("gamma", 1.0)),
-            use_weighted_mse=bool(cfg["cafd"].get("use_weighted_mse", True)),
-            use_correlation=bool(cfg["cafd"].get("use_correlation", True)),
         )
         logger.info(
-            "cafd enabled=%s lambda=%.4f temperature=%.4f alpha=%.4f beta=%.4f gamma=%.4f use_weighted_mse=%s use_correlation=%s",
+            "cafd enabled=%s lambda=%.4f temperature=%.4f formula=weighted_mse_plus_diagonal_gap correlation=disabled",
             bool(cfg["cafd"].get("enable", True)),
             float(cfg["cafd"]["lambda_cafd"]),
             float(cfg["cafd"]["temperature"]),
-            float(cfg["cafd"]["alpha"]),
-            float(cfg["cafd"]["beta"]),
-            float(cfg["cafd"].get("gamma", 1.0)),
-            bool(cfg["cafd"].get("use_weighted_mse", True)),
-            bool(cfg["cafd"].get("use_correlation", True)),
         )
         logger.info(
             "logits_kd enabled=%s lambda=%.4f temperature=%.4f warmup_epochs=%d confidence_threshold=%.4f",

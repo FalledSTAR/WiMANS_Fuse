@@ -23,26 +23,40 @@ def compute_similarity(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return torch.matmul(x, y.transpose(0, 1))
 
 
+def compute_weighted_mse_loss(
+    student_feat: torch.Tensor,
+    teacher_feat: torch.Tensor,
+    temperature: float = 0.1,
+    eps: float = 1e-8,
+):
+    mse_per_sample = F.mse_loss(student_feat, teacher_feat, reduction="none").mean(dim=1)
+    plain_mse = mse_per_sample.mean()
+
+    student_teacher_similarity = compute_similarity(student_feat, teacher_feat)
+    teacher_teacher_similarity = compute_similarity(teacher_feat, teacher_feat)
+
+    sim_diff = torch.abs(teacher_teacher_similarity - student_teacher_similarity)
+    diagonal_gap = torch.diagonal(sim_diff).sum() / sim_diff.sum().clamp_min(eps)
+
+    relation_kl_per_sample = bi_kl_divergence(
+        student_teacher_similarity / temperature,
+        teacher_teacher_similarity / temperature,
+    )
+    weighted_mse = (relation_kl_per_sample * mse_per_sample).mean()
+
+    return weighted_mse, relation_kl_per_sample.mean(), plain_mse, diagonal_gap
+
+
 class CAFDLoss(nn.Module):
     def __init__(
         self,
         temperature: float = 0.1,
-        alpha: float = 1.0,
-        beta: float = 1.0,
-        gamma: float = 1.0,
-        use_weighted_mse: bool = True,
-        use_correlation: bool = True,
         eps: float = 1e-8,
     ):
         super().__init__()
         if temperature <= 0:
             raise ValueError("temperature must be positive")
         self.temperature = temperature
-        self.alpha = alpha
-        self.beta = beta
-        self.gamma = gamma
-        self.use_weighted_mse = use_weighted_mse
-        self.use_correlation = use_correlation
         self.eps = eps
 
     def forward(self, student_feat: torch.Tensor, teacher_feat: torch.Tensor, return_details: bool = False):
@@ -52,43 +66,28 @@ class CAFDLoss(nn.Module):
                 f"got student={tuple(student_feat.shape)} teacher={tuple(teacher_feat.shape)}"
             )
 
-        student = F.normalize(student_feat, dim=-1)
-        teacher = F.normalize(teacher_feat.detach(), dim=-1)
+        student = student_feat
+        teacher = teacher_feat.detach()
         batch_size = int(student.shape[0])
 
         plain_mse_per_sample = F.mse_loss(student, teacher, reduction="none").mean(dim=-1)
         plain_mse = plain_mse_per_sample.mean()
 
         zero = student.new_zeros(())
-        weighted_mse = plain_mse if self.use_weighted_mse else zero
+        weighted_mse = plain_mse
         correlation = zero
         diagonal_gap = zero
         relation_kl = zero
 
         if batch_size > 1:
-            student_teacher_similarity = compute_similarity(student, teacher)
-            teacher_teacher_similarity = compute_similarity(teacher, teacher)
-
-            relation_kl_per_sample = bi_kl_divergence(
-                student_teacher_similarity / self.temperature,
-                teacher_teacher_similarity / self.temperature,
+            weighted_mse, relation_kl, plain_mse, diagonal_gap = compute_weighted_mse_loss(
+                student,
+                teacher,
+                temperature=self.temperature,
+                eps=self.eps,
             )
-            relation_kl = relation_kl_per_sample.mean()
 
-            sim_diff = torch.abs(teacher_teacher_similarity - student_teacher_similarity)
-            diagonal_gap = torch.diagonal(sim_diff).sum() / sim_diff.sum().clamp_min(self.eps)
-
-            if self.use_weighted_mse:
-                weighted_mse = (relation_kl_per_sample * plain_mse_per_sample).mean()
-
-            if self.use_correlation:
-                student_student_similarity = compute_similarity(student, student)
-                correlation = bi_kl_divergence(
-                    student_student_similarity / self.temperature,
-                    teacher_teacher_similarity / self.temperature,
-                ).mean()
-
-        loss = self.alpha * weighted_mse + self.beta * correlation + self.gamma * diagonal_gap
+        loss = weighted_mse + diagonal_gap
         details = {
             "weighted_mse": weighted_mse.detach(),
             "correlation": correlation.detach(),

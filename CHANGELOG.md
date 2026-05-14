@@ -465,6 +465,36 @@ recorded here before moving the project to the 4080S machine.
   - `model.train()` keeps both frozen `video_projector` and `projector_classifier` in eval mode.
   - Latest copied projected-teacher run analysis confirmed no meaningful improvement over the raw-feature CAFD range, so RSD should remain off for the next run until the projected teacher logits path is tested.
 
+## v0.1.20 - 2026-05-14
+
+- Implementation commits: `9a2c6b7`, `03d5070`
+- Changes:
+  - Reworked `losses/cafd_loss.py` to match the paper-style CAFD weighted-MSE branch used in the CMAD public code.
+  - CAFD weighted-MSE now uses raw student/teacher features for MSE, while cosine-normalized features are used only for similarity matrices.
+  - Removed the extra `student_student_similarity` correlation branch from the active CAFD loss.
+  - Deprecated `alpha`, `beta`, `gamma`, `use_weighted_mse`, and `use_correlation` from the default CAFD config and training log.
+  - The active CAFD formula is now exactly `loss = weighted_mse + diagonal_gap`, where `weighted_mse = mean(bi_kl(sim_stu_tea/tau, sim_tea_tea/tau) * mse_per_sample)`.
+  - Kept the historical `cafd_correlation` CSV/log field as `0.0` for compatibility with previous analysis scripts.
+  - Updated `scripts/smoke_v1.py` so it no longer expects removed CAFD config keys.
+  - Changed the default V1 config to CAFD-only for the next clean run: `lambda_cafd=0.5`, `lambda_logits=0.0`, and `lambda_rsd=0.0`.
+  - Kept logits KD and RSD code paths available as explicit ablations, but removed them from the default CAFD validation run.
+- Problems found:
+  - The copied run `20260513_215214` correctly used `teacher_logits_source=projector_classifier`, but still peaked at only `val_acc=0.350140` on epochs 31 and 34.
+  - That run used `lambda_cafd=0.5`, `lambda_logits=0.05`, and `lambda_rsd=0.0`; average weighted CAFD contributed about `0.25-0.34`, while weighted logits KD contributed about `0.18-0.20` after warmup.
+  - Because CAFD already uses relation-distribution KL on features, adding category-distribution soft-label KD is not mathematically identical but can blur diagnosis. The next run should isolate CAFD first.
+  - Best predictions remained class-biased: `nothing` stayed near perfect, but `stand_up` was only `0.05`, `rotation` `0.1282`, and `sit_down` `0.1795`.
+- Validation commands:
+  - `python -m compileall .\WiMANS_Baseline\losses\cafd_loss.py .\WiMANS_Baseline\train.py`
+  - `python -m compileall .\WiMANS_Baseline\losses\cafd_loss.py .\WiMANS_Baseline\train.py .\WiMANS_Baseline\scripts\smoke_v1.py`
+  - `python -c "import importlib.util, pathlib, sys, torch; ..."`
+  - `Import-Csv .\WiMANS_Baseline\output\wimans_5g_single_baseline\v1\20260513_215214\metrics\epochs.csv | Sort-Object @{Expression={[double]$_.val_acc};Descending=$true} | Select-Object -First 8`
+- Validation result:
+  - Static compile passed.
+  - Random-feature comparison against `CMAD-main/CMAD_sentiment/Student_Model/loss.py` matched exactly for `compute_weighted_mse_loss`: absolute difference `0.0`.
+  - New CAFD details returned `cafd_correlation=0.0`; the active loss matched `cafd_weighted_mse + cafd_diagonal_gap`.
+  - Student features received finite gradients.
+  - Batch size 1 remains finite for local smoke checks, returning the direct MSE fallback instead of the original CMAD relation-matrix division by zero.
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.
