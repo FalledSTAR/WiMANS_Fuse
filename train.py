@@ -227,6 +227,16 @@ def get_current_lrs(optimizer) -> dict:
     return lrs
 
 
+def get_cafd_cfg(cfg) -> dict:
+    cafd_cfg = cfg.get("cafd", {})
+    lambda_cafd = float(cafd_cfg.get("lambda_cafd", 0.0))
+    return {
+        "enabled": bool(cafd_cfg.get("enable", True)) and lambda_cafd > 0,
+        "lambda_cafd": lambda_cafd,
+        "temperature": float(cafd_cfg.get("temperature", 0.1)),
+    }
+
+
 def get_rsd_cfg(cfg) -> dict:
     rsd_cfg = cfg.get("rsd", {})
     return {
@@ -267,6 +277,7 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
     total_samples = 0
     batch_rows = []
     log_interval = max(int(cfg["train"].get("log_interval", 50)), 1)
+    cafd_cfg = get_cafd_cfg(cfg)
     rsd_cfg = get_rsd_cfg(cfg)
     lambda_rsd_effective = effective_rsd_lambda(rsd_cfg, epoch)
     samples_seen = 0
@@ -300,12 +311,16 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             outputs = model(wifi, video)
             logits = outputs["logits"]
             cls_loss = classification_loss(logits, labels, "single_ce")
-            cafd_loss, cafd_details = cafd_loss_fn(
-                outputs["wifi_distill_feature"],
-                outputs["teacher_distill_feature"],
-                return_details=True,
-            )
-            loss = cls_loss + float(cfg["cafd"]["lambda_cafd"]) * cafd_loss
+            loss = cls_loss
+            cafd_loss = None
+            cafd_details = None
+            if cafd_loss_fn is not None and cafd_cfg["enabled"]:
+                cafd_loss, cafd_details = cafd_loss_fn(
+                    outputs["wifi_distill_feature"],
+                    outputs["teacher_distill_feature"],
+                    return_details=True,
+                )
+                loss = loss + cafd_cfg["lambda_cafd"] * cafd_loss
             rsd_value = None
             rsd_details = None
             if rsd_loss_fn is not None and rsd_cfg["enabled"] and lambda_rsd_effective > 0:
@@ -313,12 +328,12 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
                 rsd_value, rsd_details = rsd_loss_fn(student_rsd, teacher_rsd, return_details=True)
                 loss = loss + lambda_rsd_effective * rsd_value
             cls_loss_value = float(cls_loss.item())
-            cafd_loss_value = float(cafd_loss.item())
-            cafd_weighted_mse_value = float(cafd_details["weighted_mse"].item())
-            cafd_correlation_value = float(cafd_details["correlation"].item())
-            cafd_diagonal_gap_value = float(cafd_details["diagonal_gap"].item())
-            cafd_relation_kl_value = float(cafd_details["relation_kl"].item())
-            cafd_plain_mse_value = float(cafd_details["plain_mse"].item())
+            cafd_loss_value = None if cafd_loss is None else float(cafd_loss.item())
+            cafd_weighted_mse_value = None if cafd_details is None else float(cafd_details["weighted_mse"].item())
+            cafd_correlation_value = None if cafd_details is None else float(cafd_details["correlation"].item())
+            cafd_diagonal_gap_value = None if cafd_details is None else float(cafd_details["diagonal_gap"].item())
+            cafd_relation_kl_value = None if cafd_details is None else float(cafd_details["relation_kl"].item())
+            cafd_plain_mse_value = None if cafd_details is None else float(cafd_details["plain_mse"].item())
             rsd_loss_value = None if rsd_value is None else float(rsd_value.item())
             rsd_weighted_value = None if rsd_value is None else float((lambda_rsd_effective * rsd_value).item())
             lambda_rsd_value = lambda_rsd_effective
@@ -596,11 +611,14 @@ def main():
     model = model.to(device)
 
     class_names = [ID_TO_ACTIVITY[class_id] for class_id in sorted(ID_TO_ACTIVITY)]
+    cafd_cfg = get_cafd_cfg(cfg)
     rsd_cfg = get_rsd_cfg(cfg)
     if args.stage == "v0":
         model_name = "xfi_resnet18"
     else:
-        model_parts = ["xfi_resnet18", "s3d", "cafd"]
+        model_parts = ["xfi_resnet18", "s3d"]
+        if cafd_cfg["enabled"]:
+            model_parts.append("cafd")
         if rsd_cfg["enabled"]:
             model_parts.append("rsd")
         model_name = "_with_".join(model_parts)
@@ -618,14 +636,15 @@ def main():
     cafd_loss_fn = None
     rsd_loss_fn = None
     if args.stage == "v1":
-        cafd_loss_fn = CAFDLoss(
-            temperature=float(cfg["cafd"]["temperature"]),
-        )
+        if cafd_cfg["enabled"]:
+            cafd_loss_fn = CAFDLoss(
+                temperature=cafd_cfg["temperature"],
+            )
         logger.info(
             "cafd enabled=%s lambda=%.4f temperature=%.4f formula=weighted_mse_plus_diagonal_gap correlation=disabled",
-            bool(cfg["cafd"].get("enable", True)),
-            float(cfg["cafd"]["lambda_cafd"]),
-            float(cfg["cafd"]["temperature"]),
+            cafd_cfg["enabled"],
+            cafd_cfg["lambda_cafd"],
+            cafd_cfg["temperature"],
         )
         rsd_loss_fn = RSDLoss(
             kappa=rsd_cfg["kappa"],
