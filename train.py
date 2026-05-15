@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from datasets import ID_TO_ACTIVITY, WiMANSHARDataset, build_single_user_dataframe, build_single_user_label  # noqa: E402
-from losses import CAFDLoss, RSDLoss, classification_loss, logits_kd_loss  # noqa: E402
+from losses import CAFDLoss, RSDLoss, classification_loss  # noqa: E402
 from models import VideoWiFiCAFDModel, XFiWiFiStudent  # noqa: E402
 from utils import (  # noqa: E402
     accuracy_top1,
@@ -41,9 +41,6 @@ def parse_args():
     parser.add_argument("--teacher-checkpoint", default=None)
     parser.add_argument("--projector-target", choices=["video_feature", "projected"], default=None)
     parser.add_argument("--lambda-cafd", type=float, default=None)
-    parser.add_argument("--lambda-logits", type=float, default=None)
-    parser.add_argument("--kd-temperature", type=float, default=None)
-    parser.add_argument("--kd-warmup-epochs", type=int, default=None)
     parser.add_argument("--lambda-rsd", type=float, default=None)
     parser.add_argument("--rsd-kappa", type=float, default=None)
     parser.add_argument("--rsd-warmup-epochs", type=int, default=None)
@@ -128,6 +125,7 @@ def build_model(cfg, stage: str):
         freeze_video_projector=bool(cfg["projector"].get("freeze_video_projector", True)),
         use_projector_logits=bool(cfg["projector"].get("use_projector_logits", True)),
         projector_dropout=float(cfg["projector"].get("dropout", 0.2)),
+        rsd_gamma=int(cfg.get("rsd", {}).get("gamma", 2)),
     )
 
 
@@ -229,33 +227,13 @@ def get_current_lrs(optimizer) -> dict:
     return lrs
 
 
-def get_logits_kd_cfg(cfg) -> dict:
-    kd_cfg = cfg.get("logits_kd", {})
-    return {
-        "enabled": bool(kd_cfg.get("enable", False)) and float(kd_cfg.get("lambda_logits", 0.0)) > 0,
-        "lambda_logits": float(kd_cfg.get("lambda_logits", 0.0)),
-        "temperature": float(kd_cfg.get("temperature", 4.0)),
-        "warmup_epochs": int(kd_cfg.get("warmup_epochs", 0)),
-        "confidence_threshold": float(kd_cfg.get("confidence_threshold", 0.0)),
-    }
-
-
-def effective_logits_kd_lambda(kd_cfg: dict, epoch: int) -> float:
-    target = float(kd_cfg["lambda_logits"])
-    warmup_epochs = int(kd_cfg.get("warmup_epochs", 0))
-    if not kd_cfg["enabled"] or target <= 0:
-        return 0.0
-    if warmup_epochs <= 0:
-        return target
-    return target * min(max(int(epoch), 1) / warmup_epochs, 1.0)
-
-
 def get_rsd_cfg(cfg) -> dict:
     rsd_cfg = cfg.get("rsd", {})
     return {
         "enabled": bool(rsd_cfg.get("enable", False)) and float(rsd_cfg.get("lambda_rsd", 0.0)) > 0,
         "lambda_rsd": float(rsd_cfg.get("lambda_rsd", 0.0)),
         "kappa": float(rsd_cfg.get("kappa", 0.01)),
+        "gamma": int(rsd_cfg.get("gamma", 2)),
         "warmup_epochs": int(rsd_cfg.get("warmup_epochs", 0)),
         "source": str(rsd_cfg.get("source", "distill")),
         "reduction": str(rsd_cfg.get("reduction", "sum")),
@@ -274,7 +252,7 @@ def effective_rsd_lambda(rsd_cfg: dict, epoch: int) -> float:
 
 def select_rsd_pair(outputs: dict, source: str):
     if source == "distill":
-        return outputs["wifi_distill_feature"], outputs["teacher_distill_feature"]
+        return outputs["wifi_rsd_feature"], outputs["teacher_distill_feature"]
     if source in {"video_feature", "teacher_feature"}:
         return outputs["wifi_projected"], outputs["video_feature"]
     if source == "projected":
@@ -289,8 +267,6 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
     total_samples = 0
     batch_rows = []
     log_interval = max(int(cfg["train"].get("log_interval", 50)), 1)
-    kd_cfg = get_logits_kd_cfg(cfg)
-    lambda_logits_effective = effective_logits_kd_lambda(kd_cfg, epoch)
     rsd_cfg = get_rsd_cfg(cfg)
     lambda_rsd_effective = effective_rsd_lambda(rsd_cfg, epoch)
     samples_seen = 0
@@ -306,9 +282,6 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             loss = classification_loss(logits, labels, "single_ce")
             cls_loss_value = float(loss.item())
             cafd_loss_value = None
-            logits_kd_loss_value = None
-            logits_kd_weighted_value = None
-            lambda_logits_value = None
             cafd_weighted_mse_value = None
             cafd_correlation_value = None
             cafd_diagonal_gap_value = None
@@ -333,15 +306,6 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
                 return_details=True,
             )
             loss = cls_loss + float(cfg["cafd"]["lambda_cafd"]) * cafd_loss
-            logits_kd_value = None
-            if kd_cfg["enabled"] and lambda_logits_effective > 0:
-                logits_kd_value = logits_kd_loss(
-                    logits,
-                    outputs["teacher_logits"],
-                    temperature=kd_cfg["temperature"],
-                    confidence_threshold=kd_cfg["confidence_threshold"],
-                )
-                loss = loss + lambda_logits_effective * logits_kd_value
             rsd_value = None
             rsd_details = None
             if rsd_loss_fn is not None and rsd_cfg["enabled"] and lambda_rsd_effective > 0:
@@ -350,9 +314,6 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
                 loss = loss + lambda_rsd_effective * rsd_value
             cls_loss_value = float(cls_loss.item())
             cafd_loss_value = float(cafd_loss.item())
-            logits_kd_loss_value = None if logits_kd_value is None else float(logits_kd_value.item())
-            logits_kd_weighted_value = None if logits_kd_value is None else float((lambda_logits_effective * logits_kd_value).item())
-            lambda_logits_value = lambda_logits_effective
             cafd_weighted_mse_value = float(cafd_details["weighted_mse"].item())
             cafd_correlation_value = float(cafd_details["correlation"].item())
             cafd_diagonal_gap_value = float(cafd_details["diagonal_gap"].item())
@@ -386,9 +347,6 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             "cafd_diagonal_gap": cafd_diagonal_gap_value,
             "cafd_relation_kl": cafd_relation_kl_value,
             "cafd_plain_mse": cafd_plain_mse_value,
-            "logits_kd_loss": logits_kd_loss_value,
-            "logits_kd_weighted_loss": logits_kd_weighted_value,
-            "lambda_logits_effective": lambda_logits_value,
             "rsd_loss": rsd_loss_value,
             "rsd_weighted_loss": rsd_weighted_value,
             "lambda_rsd_effective": lambda_rsd_value,
@@ -404,7 +362,7 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
 
         if logger is not None and (batch_idx == 1 or batch_idx % log_interval == 0 or batch_idx == len(loader)):
             logger.info(
-                "train epoch=%s batch=%s/%s loss=%.6f cls_loss=%.6f cafd_loss=%s cafd_weighted_mse=%s cafd_correlation=%s cafd_diagonal_gap=%s cafd_relation_kl=%s cafd_plain_mse=%s logits_kd_loss=%s logits_kd_weighted=%s lambda_logits=%s rsd_loss=%s rsd_weighted=%s lambda_rsd=%s rsd_diag_mean=%s rsd_offdiag_abs_mean=%s teacher_acc=%s acc=%.6f",
+                "train epoch=%s batch=%s/%s loss=%.6f cls_loss=%.6f cafd_loss=%s cafd_weighted_mse=%s cafd_correlation=%s cafd_diagonal_gap=%s cafd_relation_kl=%s cafd_plain_mse=%s rsd_loss=%s rsd_weighted=%s lambda_rsd=%s rsd_diag_mean=%s rsd_offdiag_abs_mean=%s teacher_acc=%s acc=%.6f",
                 epoch,
                 batch_idx,
                 len(loader),
@@ -416,9 +374,6 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
                 "None" if row["cafd_diagonal_gap"] is None else f"{row['cafd_diagonal_gap']:.6f}",
                 "None" if row["cafd_relation_kl"] is None else f"{row['cafd_relation_kl']:.6f}",
                 "None" if row["cafd_plain_mse"] is None else f"{row['cafd_plain_mse']:.6f}",
-                "None" if row["logits_kd_loss"] is None else f"{row['logits_kd_loss']:.6f}",
-                "None" if row["logits_kd_weighted_loss"] is None else f"{row['logits_kd_weighted_loss']:.6f}",
-                "None" if row["lambda_logits_effective"] is None else f"{row['lambda_logits_effective']:.6f}",
                 "None" if row["rsd_loss"] is None else f"{row['rsd_loss']:.6f}",
                 "None" if row["rsd_weighted_loss"] is None else f"{row['rsd_weighted_loss']:.6f}",
                 "None" if row["lambda_rsd_effective"] is None else f"{row['lambda_rsd_effective']:.6f}",
@@ -444,9 +399,6 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
                 "cafd_diagonal_gap",
                 "cafd_relation_kl",
                 "cafd_plain_mse",
-                "logits_kd_loss",
-                "logits_kd_weighted_loss",
-                "lambda_logits_effective",
                 "rsd_loss",
                 "rsd_weighted_loss",
                 "lambda_rsd_effective",
@@ -576,13 +528,6 @@ def main():
         cfg.setdefault("projector", {})["target"] = args.projector_target
     if args.lambda_cafd is not None:
         cfg.setdefault("cafd", {})["lambda_cafd"] = args.lambda_cafd
-    if args.lambda_logits is not None:
-        cfg.setdefault("logits_kd", {})["lambda_logits"] = args.lambda_logits
-        cfg["logits_kd"]["enable"] = args.lambda_logits > 0
-    if args.kd_temperature is not None:
-        cfg.setdefault("logits_kd", {})["temperature"] = args.kd_temperature
-    if args.kd_warmup_epochs is not None:
-        cfg.setdefault("logits_kd", {})["warmup_epochs"] = args.kd_warmup_epochs
     if args.lambda_rsd is not None:
         cfg.setdefault("rsd", {})["lambda_rsd"] = args.lambda_rsd
         cfg["rsd"]["enable"] = args.lambda_rsd > 0
@@ -629,12 +574,14 @@ def main():
         logger.info("projector_classifier_checkpoint_load_info=%s", model.projector_classifier_checkpoint_load_info)
     if args.stage == "v1":
         logger.info(
-            "projector target=%s freeze_video_projector=%s use_projector_logits=%s teacher_logits_source=%s wifi_projector_out_dim=%d video_projector_trainable_params=%d",
+            "projector target=%s freeze_video_projector=%s use_projector_logits=%s teacher_logits_source=%s wifi_projector_out_dim=%d rsd_projector_out_dim=%d rsd_projector_trainable_params=%d video_projector_trainable_params=%d",
             getattr(model, "projector_target", "unknown"),
             getattr(model, "freeze_video_projector", None),
             getattr(model, "use_projector_logits_requested", None),
             getattr(model, "teacher_logits_source", "unknown"),
             model.wifi_projector.fc_out.out_features,
+            model.rsd_projector.net[-1].out_features,
+            sum(p.numel() for p in model.rsd_projector.parameters() if p.requires_grad),
             sum(p.numel() for p in model.video_projector.parameters() if p.requires_grad),
         )
     model_text = str(model)
@@ -649,14 +596,11 @@ def main():
     model = model.to(device)
 
     class_names = [ID_TO_ACTIVITY[class_id] for class_id in sorted(ID_TO_ACTIVITY)]
-    kd_cfg = get_logits_kd_cfg(cfg)
     rsd_cfg = get_rsd_cfg(cfg)
     if args.stage == "v0":
         model_name = "xfi_resnet18"
     else:
         model_parts = ["xfi_resnet18", "s3d", "cafd"]
-        if kd_cfg["enabled"]:
-            model_parts.append("logit_kd")
         if rsd_cfg["enabled"]:
             model_parts.append("rsd")
         model_name = "_with_".join(model_parts)
@@ -683,24 +627,17 @@ def main():
             float(cfg["cafd"]["lambda_cafd"]),
             float(cfg["cafd"]["temperature"]),
         )
-        logger.info(
-            "logits_kd enabled=%s lambda=%.4f temperature=%.4f warmup_epochs=%d confidence_threshold=%.4f",
-            kd_cfg["enabled"],
-            kd_cfg["lambda_logits"],
-            kd_cfg["temperature"],
-            kd_cfg["warmup_epochs"],
-            kd_cfg["confidence_threshold"],
-        )
         rsd_loss_fn = RSDLoss(
             kappa=rsd_cfg["kappa"],
             reduction=rsd_cfg["reduction"],
         )
         logger.info(
-            "rsd enabled=%s source=%s lambda=%.6f kappa=%.6f warmup_epochs=%d reduction=%s",
+            "rsd enabled=%s source=%s lambda=%.6f kappa=%.6f gamma=%d warmup_epochs=%d reduction=%s projector=linear_bn_gelu_linear",
             rsd_cfg["enabled"],
             rsd_cfg["source"],
             rsd_cfg["lambda_rsd"],
             rsd_cfg["kappa"],
+            rsd_cfg["gamma"],
             rsd_cfg["warmup_epochs"],
             rsd_cfg["reduction"],
         )

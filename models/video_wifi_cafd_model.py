@@ -6,6 +6,31 @@ from .s3d_teacher import S3DTeacher
 from .xfi_wifi_resnet import XFiWiFiStudent
 
 
+class RSDProjector(nn.Module):
+    def __init__(self, in_dim: int, out_dim: int, gamma: int = 2):
+        super().__init__()
+        hidden_dim = int(in_dim) * int(gamma)
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim, bias=False),
+            nn.BatchNorm1d(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, out_dim, bias=False),
+        )
+        self.apply(self._init_weights)
+
+    @staticmethod
+    def _init_weights(module):
+        if isinstance(module, nn.Linear):
+            nn.init.trunc_normal_(module.weight, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 2:
+            raise ValueError(f"RSDProjector expects [B,D] features, got {tuple(x.shape)}")
+        return self.net(x)
+
+
 class VideoWiFiCAFDModel(nn.Module):
     def __init__(
         self,
@@ -21,6 +46,7 @@ class VideoWiFiCAFDModel(nn.Module):
         freeze_video_projector: bool = True,
         use_projector_logits: bool = True,
         projector_dropout: float = 0.2,
+        rsd_gamma: int = 2,
     ):
         super().__init__()
         if projector_target not in {"video_feature", "projected"}:
@@ -42,6 +68,11 @@ class VideoWiFiCAFDModel(nn.Module):
             hidden_dim=projector_hidden_dim,
             out_dim=wifi_projector_out_dim,
             num_heads=projector_num_heads,
+        )
+        self.rsd_projector = RSDProjector(
+            in_dim=self.wifi_student.feature_dim,
+            out_dim=wifi_projector_out_dim,
+            gamma=rsd_gamma,
         )
         self.video_projector = HybridProjector(
             in_dim=self.video_teacher.output_dim,
@@ -169,6 +200,7 @@ class VideoWiFiCAFDModel(nn.Module):
         video_out = self.video_teacher(video, return_logits=True)
         video_feature = video_out["feature"]
         wifi_projected = self.wifi_projector(wifi_out["tokens"])
+        wifi_rsd_feature = self.rsd_projector(wifi_out["feature"])
         if self.freeze_video_projector:
             with torch.no_grad():
                 video_projected = self.video_projector(video_feature)
@@ -193,6 +225,7 @@ class VideoWiFiCAFDModel(nn.Module):
             "wifi_feature": wifi_out["feature"],
             "video_feature": video_feature,
             "wifi_projected": wifi_projected,
+            "wifi_rsd_feature": wifi_rsd_feature,
             "video_projected": video_projected,
             "wifi_distill_feature": wifi_projected,
             "teacher_distill_feature": teacher_distill_feature,

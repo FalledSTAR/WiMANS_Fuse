@@ -134,7 +134,6 @@ def build_wimans_result_payload(model_name, task, cfg, model_summary=None):
         "video": cfg.get("video", {}),
         "projector": cfg.get("projector", {}),
         "cafd": cfg.get("cafd", {}),
-        "logits_kd": cfg.get("logits_kd", {}),
         "complexity": (model_summary or {}).get("flops", {}),
         "epochs": [],
         "accuracy": {"avg": 0.0, "std": 0.0},

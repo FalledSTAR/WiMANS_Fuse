@@ -9,7 +9,7 @@ resources in git.
 
 - V0: run a stable 5 GHz single-user WiFi-only HAR baseline with X-Fi WiFi ResNet-18 initialization.
 - Video teacher: train a selectable WiMANS-style visual teacher before distillation.
-- V1: add frozen trained video teacher, Hybrid Projector, CAFD feature relation distillation, and video-logits KD.
+- V1: add frozen trained video teacher, Hybrid Projector, and CAFD feature relation distillation.
 - Keep the local laptop workflow focused on smoke tests and small runs.
 - Move the whole project, including `.git/`, to the 4080S machine for full training.
 
@@ -134,7 +134,6 @@ The default V1 config now uses the trained teacher at
 `../backbone_models/video/video_s3d.pt` for the CAFD feature-relation signal:
 
 - CMAD-style CAFD relation distillation with `cafd.lambda_cafd`.
-- Teacher-class probability distillation with `logits_kd.lambda_logits` is kept as an optional soft-label KD ablation.
 - RSD feature redundancy suppression with `rsd.lambda_rsd` is kept as an optional feature-correlation ablation.
 
 The current default feature target is `projector.target: video_feature`.
@@ -143,27 +142,22 @@ the raw S3D 1024-d feature space. The retained `video_projector` is frozen by
 default through `projector.freeze_video_projector: true` and is not used as the
 CAFD/RSD teacher target in this experiment.
 
-The current default is CAFD-only: `logits_kd.lambda_logits: 0.0` and
-`rsd.lambda_rsd: 0.0`. This avoids mixing category-distribution KD with CAFD
-while checking whether the paper-style CAFD feature relation loss can improve
-the X-Fi ResNet-18 WiFi student by itself.
+The current default is CAFD-only: `rsd.lambda_rsd: 0.0`. This avoids mixing
+other distillation losses with CAFD while checking whether the paper-style CAFD
+feature relation loss can improve the X-Fi ResNet-18 WiFi student by itself.
 The CAFD loss follows the original formula used here for diagnosis:
 `loss = weighted_mse + diagonal_gap`. It does not use the extra
 student-student correlation branch or internal `alpha/beta/gamma` weights.
 For a WiFi-only same-split ablation, run `--stage v0` with the same data section.
-For a logits-only ablation, set `cafd.lambda_cafd: 0.0` and keep
-`logits_kd.lambda_logits` enabled while setting `rsd.lambda_rsd: 0.0`.
-The default logits KD is intentionally conservative: `lambda_logits: 0.1` with
-`warmup_epochs: 5`. Earlier `lambda_logits: 0.5` runs made the weighted KD term
-much larger than CE and only improved best validation accuracy to about `0.375`.
+The previous logits-KD path was removed from the active project because it did
+not produce a reliable improvement and made CAFD-only diagnosis less clean.
 
 Useful 4080S ablation commands:
 
 ```powershell
 python train.py --config config\config.yaml --stage v1
-python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.5 --lambda-logits 0.0 --lambda-rsd 0.0
-python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.5 --lambda-logits 0.05 --lambda-rsd 0.0 --kd-warmup-epochs 5
-python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.5 --lambda-logits 0.0 --lambda-rsd 0.0001 --rsd-warmup-epochs 5
+python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.2 --lambda-rsd 0.0
+python train.py --config config\config.yaml --stage v1 --lambda-cafd 0.5 --lambda-rsd 0.0001 --rsd-warmup-epochs 5
 ```
 
 Run the default CAFD-only V1 command first. The earlier projected-target run
@@ -177,9 +171,9 @@ CAFD-only component ablations.
 For the supervised projected-video teacher route, use a checkpoint trained in
 `train_video_teacher.py --mode projector`. When `--projector-target projected`
 is selected, V1 now requires the checkpoint to contain trained
-`video_projector.*` weights. With `projector.use_projector_logits: true`, it
-also uses the trained `projector_classifier.*` logits for soft-label KD so the
-feature target and logits target come from the same projected teacher branch.
+`video_projector.*` weights. The trained `projector_classifier.*` logits are
+kept for teacher prediction diagnostics, but they are not used as an additional
+soft-label KD loss.
 
 Laptop-sized V1 training check:
 
@@ -263,7 +257,7 @@ be copied into the external backbone folder and used directly by V1.
 To distill from the trained projected teacher space:
 
 ```powershell
-python train.py --config config\config.yaml --stage v1 --teacher-checkpoint ../backbone_models/video/video_projector_s3d.pt --projector-target projected --lambda-cafd 0.5 --lambda-logits 0.0 --lambda-rsd 0.0
+python train.py --config config\config.yaml --stage v1 --teacher-checkpoint ../backbone_models/video/video_projector_s3d.pt --projector-target projected --lambda-cafd 0.2 --lambda-rsd 0.0
 ```
 
 Use that checkpoint later as the visual teacher branch for the first distillation
@@ -330,8 +324,8 @@ checkpoints/top_k_checkpoints.csv # top checkpoint ranking for video teacher run
 ```
 
 For V1 runs, `metrics/train_batches.csv` records `classification_loss`,
-`cafd_loss`, raw and weighted `logits_kd_loss`, effective logits KD lambda,
-student accuracy, and frozen teacher accuracy.
+`cafd_loss`, CAFD component values, optional RSD values, student accuracy, and
+frozen teacher accuracy.
 Historical `output/` folders are not backfilled; use new run directories for the
 current result format.
 

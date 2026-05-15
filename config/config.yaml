@@ -48,18 +48,12 @@ cafd:
   temperature: 0.1
   lambda_cafd: 0.5
 
-logits_kd:
-  enable: false
-  temperature: 4.0
-  lambda_logits: 0.0
-  warmup_epochs: 5
-  confidence_threshold: 0.0
-
 rsd:
   enable: false
   source: distill
   lambda_rsd: 0.0
   kappa: 0.01
+  gamma: 2
   warmup_epochs: 5
   reduction: sum
 

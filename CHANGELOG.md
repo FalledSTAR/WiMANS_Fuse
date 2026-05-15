@@ -495,6 +495,29 @@ recorded here before moving the project to the 4080S machine.
   - Student features received finite gradients.
   - Batch size 1 remains finite for local smoke checks, returning the direct MSE fallback instead of the original CMAD relation-matrix division by zero.
 
+## v0.1.21 - 2026-05-14
+
+- Implementation commit: `cb9d4e7`
+- Changes:
+  - Removed the logits-KD loss path from the active project code.
+  - Deleted `losses/logits_kd_loss.py` and removed its export from `losses/__init__.py`.
+  - Removed logits-KD CLI arguments from `train.py`: `--lambda-logits`, `--kd-temperature`, and `--kd-warmup-epochs`.
+  - Removed logits-KD config from `config/config.yaml` and removed logits-KD metadata from new `result.json` payloads.
+  - Removed logits-KD loss computation, per-batch CSV columns, model-name suffix, and train-log lines from new V1 runs.
+  - Updated README so the current route is CE + paper-style CAFD, with RSD kept only as a later optional ablation.
+- Problems found:
+  - CAFD contains a feature-relation KL term, while logits KD used a class-probability KL term. They are not identical, but previous experiments showed logits KD did not provide a decisive gain and made CAFD-only diagnosis harder.
+  - The current paper-style CAFD-only run `20260514_130639` reached `val_acc=0.378151` by epoch 17, which is a small improvement but still far from the target. This supports reducing CAFD weight first, then moving to a WiFi heatmap teacher branch if the result remains low.
+  - RSD should not be the next main direction because it is another feature-correlation/distillation regularizer; if CAFD already fails to transfer enough class-discriminative structure, RSD is more likely a small ablation than the main fix.
+- Validation commands:
+  - `python -m compileall .\WiMANS_Baseline\train.py .\WiMANS_Baseline\losses .\WiMANS_Baseline\utils .\WiMANS_Baseline\scripts\smoke_v1.py`
+  - `rg -n "logits_kd|lambda_logits|kd_|logit_kd" .\WiMANS_Baseline\train.py .\WiMANS_Baseline\config\config.yaml .\WiMANS_Baseline\README.md .\WiMANS_Baseline\losses .\WiMANS_Baseline\utils .\WiMANS_Baseline\scripts`
+  - `python -c "import sys, yaml; sys.path.insert(0, r'D:\PYTHON\Project\WiMANS_fuse\WiMANS_Baseline'); import train; ..."`
+- Validation result:
+  - Static compile passed.
+  - Active code/config/docs search returned no logits-KD references.
+  - Config check returned `has_logits_kd=False`; RSD config parsing still works.
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.
