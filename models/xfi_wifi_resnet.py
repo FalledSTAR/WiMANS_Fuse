@@ -172,8 +172,21 @@ class XFiWiFiOriginalFC(nn.Module):
             for name, parameter in self.backbone.named_parameters():
                 parameter.requires_grad = name.startswith("fc.")
 
+    def extract_tokens(self, wifi: torch.Tensor) -> torch.Tensor:
+        x = self.backbone.relu(self.backbone.bn1(self.backbone.conv1(wifi)))
+        x = self.backbone.maxpool(x)
+        x = self.backbone.layer1(x)
+        x = self.backbone.layer2(x)
+        x = self.backbone.layer3(x)
+        x = self.backbone.layer4(x)
+        x = x.view(x.size(0), self.feature_dim, -1)
+        return x.permute(0, 2, 1).contiguous()
+
     def forward(self, wifi: torch.Tensor, return_features: bool = False):
-        logits = self.backbone(wifi)
+        tokens = self.extract_tokens(wifi)
+        pooled = self.backbone.avg_pool(tokens.permute(0, 2, 1).contiguous())
+        pooled = pooled.view(pooled.size(0), -1)
+        logits = self.backbone.fc(pooled)
         if return_features:
-            return {"logits": logits}
+            return {"logits": logits, "feature": pooled, "tokens": tokens}
         return logits
