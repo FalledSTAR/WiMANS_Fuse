@@ -3,7 +3,7 @@ from torch import nn
 
 from .hybrid_projector import HybridProjector
 from .s3d_teacher import S3DTeacher
-from .xfi_wifi_resnet import XFiWiFiStudent
+from .xfi_wifi_resnet import XFiWiFiOriginalFC, XFiWiFiStudent
 
 
 class RSDProjector(nn.Module):
@@ -47,13 +47,20 @@ class VideoWiFiCAFDModel(nn.Module):
         use_projector_logits: bool = True,
         projector_dropout: float = 0.2,
         rsd_gamma: int = 2,
+        wifi_student_mode: str = "token_pool",
     ):
         super().__init__()
         if projector_target not in {"video_feature", "projected"}:
             raise ValueError("projector_target must be 'video_feature' or 'projected'")
+        if wifi_student_mode not in {"token_pool", "original_fc"}:
+            raise ValueError("wifi_student_mode must be 'token_pool' or 'original_fc'")
         self.projector_target = projector_target
+        self.wifi_student_mode = wifi_student_mode
         self.use_projector_logits_requested = bool(use_projector_logits)
-        self.wifi_student = XFiWiFiStudent(weight_path=xfi_weight_path, num_classes=num_classes)
+        if wifi_student_mode == "original_fc":
+            self.wifi_student = XFiWiFiOriginalFC(weight_path=xfi_weight_path, num_classes=num_classes)
+        else:
+            self.wifi_student = XFiWiFiStudent(weight_path=xfi_weight_path, num_classes=num_classes)
         self.video_teacher = S3DTeacher(
             weights=s3d_weights,
             freeze=freeze_s3d,

@@ -12,7 +12,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from datasets import ID_TO_ACTIVITY, WiMANSHARDataset, build_single_user_dataframe, build_single_user_label  # noqa: E402
 from losses import CAFDLoss, RSDLoss, classification_loss  # noqa: E402
-from models import VideoWiFiCAFDModel, XFiWiFiStudent  # noqa: E402
+from models import VideoWiFiCAFDModel, XFiWiFiOriginalFC, XFiWiFiStudent  # noqa: E402
 from utils import (  # noqa: E402
     accuracy_top1,
     append_csv_rows,
@@ -36,6 +36,12 @@ def parse_args():
     parser.add_argument("--config", default=str(PROJECT_ROOT / "config" / "config.yaml"))
     parser.add_argument("--stage", choices=["v0", "v1"], default="v0")
     parser.add_argument("--sample-limit", type=int, default=None)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--wifi-student", choices=["token_pool", "original_fc"], default=None)
+    parser.add_argument("--scheduler-factor", type=float, default=None)
+    parser.add_argument("--scheduler-patience", type=int, default=None)
+    parser.add_argument("--scheduler-min-lr", type=float, default=None)
     parser.add_argument("--num-frames", type=int, default=None)
     parser.add_argument("--s3d-weights", default=None)
     parser.add_argument("--teacher-checkpoint", default=None)
@@ -107,8 +113,13 @@ def build_loaders(cfg, use_video: bool):
 
 def build_model(cfg, stage: str):
     weight_path = resolve_path(PROJECT_ROOT, cfg["model"]["xfi_weight_path"])
+    wifi_student_mode = str(cfg["model"].get("wifi_student", "token_pool"))
     if stage == "v0":
-        return XFiWiFiStudent(weight_path=weight_path, num_classes=cfg["model"]["num_classes"])
+        if wifi_student_mode == "original_fc":
+            return XFiWiFiOriginalFC(weight_path=weight_path, num_classes=cfg["model"]["num_classes"])
+        if wifi_student_mode == "token_pool":
+            return XFiWiFiStudent(weight_path=weight_path, num_classes=cfg["model"]["num_classes"])
+        raise ValueError("model.wifi_student must be 'token_pool' or 'original_fc'")
 
     teacher_checkpoint = cfg["video"].get("teacher_checkpoint")
     teacher_checkpoint_path = resolve_path(PROJECT_ROOT, teacher_checkpoint) if teacher_checkpoint else None
@@ -126,7 +137,20 @@ def build_model(cfg, stage: str):
         use_projector_logits=bool(cfg["projector"].get("use_projector_logits", True)),
         projector_dropout=float(cfg["projector"].get("dropout", 0.2)),
         rsd_gamma=int(cfg.get("rsd", {}).get("gamma", 2)),
+        wifi_student_mode=wifi_student_mode,
     )
+
+
+def get_wifi_backbone_params(student_model):
+    if hasattr(student_model, "feature_extractor"):
+        return list(student_model.feature_extractor.parameters())
+    if hasattr(student_model, "backbone"):
+        return [
+            parameter
+            for name, parameter in student_model.backbone.named_parameters()
+            if not name.startswith("fc.")
+        ]
+    raise AttributeError(f"Unsupported WiFi student type: {type(student_model).__name__}")
 
 
 def build_optimizer(model, cfg, stage: str, logger=None) -> torch.optim.Optimizer:
@@ -146,12 +170,9 @@ def build_optimizer(model, cfg, stage: str, logger=None) -> torch.optim.Optimize
 
     # Collect backbone parameter ids so we can split the groups cleanly.
     if stage == "v0":
-        # XFiWiFiStudent: feature_extractor is the pretrained backbone.
-        backbone_params = list(model.feature_extractor.parameters())
+        backbone_params = get_wifi_backbone_params(model)
     else:
-        # VideoWiFiCAFDModel: wifi_student.feature_extractor is the pretrained backbone.
-        # S3D teacher is frozen entirely and contributes no gradients.
-        backbone_params = list(model.wifi_student.feature_extractor.parameters())
+        backbone_params = get_wifi_backbone_params(model.wifi_student)
 
     backbone_ids = {id(p) for p in backbone_params}
     backbone_trainable = [p for p in backbone_params if p.requires_grad]
@@ -533,6 +554,18 @@ def main():
     cfg = load_config(args.config)
     if args.sample_limit is not None:
         cfg["data"]["sample_limit"] = args.sample_limit
+    if args.epochs is not None:
+        cfg.setdefault("train", {})["epochs"] = args.epochs
+    if args.batch_size is not None:
+        cfg.setdefault("train", {})["batch_size"] = args.batch_size
+    if args.wifi_student is not None:
+        cfg.setdefault("model", {})["wifi_student"] = args.wifi_student
+    if args.scheduler_factor is not None:
+        cfg.setdefault("train", {}).setdefault("scheduler", {})["factor"] = args.scheduler_factor
+    if args.scheduler_patience is not None:
+        cfg.setdefault("train", {}).setdefault("scheduler", {})["patience"] = args.scheduler_patience
+    if args.scheduler_min_lr is not None:
+        cfg.setdefault("train", {}).setdefault("scheduler", {})["min_lr"] = args.scheduler_min_lr
     if args.num_frames is not None:
         cfg["video"]["num_frames"] = args.num_frames
     if args.s3d_weights is not None:
@@ -581,6 +614,7 @@ def main():
     logger.info("saved_val_split=%s", run_dir / "splits" / "val.csv")
 
     model = build_model(cfg, args.stage)
+    logger.info("wifi_student_mode=%s", cfg["model"].get("wifi_student", "token_pool"))
     if args.stage == "v1" and getattr(model.video_teacher, "checkpoint_path", None):
         logger.info("loaded_video_teacher_checkpoint=%s", model.video_teacher.checkpoint_path)
         logger.info("video_teacher_checkpoint_extra=%s", model.video_teacher.checkpoint_extra)
@@ -614,9 +648,9 @@ def main():
     cafd_cfg = get_cafd_cfg(cfg)
     rsd_cfg = get_rsd_cfg(cfg)
     if args.stage == "v0":
-        model_name = "xfi_resnet18"
+        model_name = f"xfi_resnet18_{cfg['model'].get('wifi_student', 'token_pool')}"
     else:
-        model_parts = ["xfi_resnet18", "s3d"]
+        model_parts = [f"xfi_resnet18_{cfg['model'].get('wifi_student', 'token_pool')}", "s3d"]
         if cafd_cfg["enabled"]:
             model_parts.append("cafd")
         if rsd_cfg["enabled"]:

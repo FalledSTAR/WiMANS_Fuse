@@ -28,6 +28,7 @@ video:
 
 model:
   wifi_backbone: xfi_resnet18
+  wifi_student: token_pool
   xfi_weight_path: ../backbone_models/WiFi/wifi_ResNet18.pt
   wifi_input_channels: 270
   num_classes: 9
