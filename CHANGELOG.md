@@ -537,7 +537,7 @@ recorded here before moving the project to the 4080S machine.
 
 ## v0.1.23 - 2026-05-17
 
-- Implementation commit: `0da1b7f`
+- Implementation commit: `c153731`
 - Changes:
   - Changed the default WiFi amplitude preprocessing from `log1p_zscore` to `none`.
   - Added `train.py --normalize {none,zscore,log1p_zscore}` so normalization can be controlled from the command line and recorded in each run's saved config.
