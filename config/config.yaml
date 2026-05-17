@@ -14,7 +14,7 @@ data:
   target_len: 3000
   pad_mode: left
   truncate_mode: tail
-  normalize: log1p_zscore
+  normalize: none
   sample_limit: null
   test_size: 0.2
 
