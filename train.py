@@ -38,6 +38,7 @@ def parse_args():
     parser.add_argument("--sample-limit", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--normalize", choices=["none", "zscore", "log1p_zscore"], default=None)
     parser.add_argument("--wifi-student", choices=["token_pool", "original_fc"], default=None)
     parser.add_argument("--scheduler-factor", type=float, default=None)
     parser.add_argument("--scheduler-patience", type=int, default=None)
@@ -558,6 +559,8 @@ def main():
         cfg.setdefault("train", {})["epochs"] = args.epochs
     if args.batch_size is not None:
         cfg.setdefault("train", {})["batch_size"] = args.batch_size
+    if args.normalize is not None:
+        cfg.setdefault("data", {})["normalize"] = args.normalize
     if args.wifi_student is not None:
         cfg.setdefault("model", {})["wifi_student"] = args.wifi_student
     if args.scheduler_factor is not None:

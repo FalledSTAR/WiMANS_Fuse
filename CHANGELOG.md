@@ -518,6 +518,41 @@ recorded here before moving the project to the 4080S machine.
   - Active code/config/docs search returned no logits-KD references.
   - Config check returned `has_logits_kd=False`; RSD config parsing still works.
 
+## v0.1.22 - 2026-05-16
+
+- Implementation commit: `f738248`
+- Changes:
+  - Added `XFiWiFiOriginalFC`, an optional WiFi student that follows the original X-Fi ResNet-18 forward path and replaces only the final `fc` layer with a 9-class classifier.
+  - Added `--wifi-student {token_pool,original_fc}` for direct V0/V1 comparison between the token-pool route and the original X-Fi classifier route.
+  - Added scheduler CLI overrides: `--epochs`, `--batch-size`, `--scheduler-factor`, `--scheduler-patience`, and `--scheduler-min-lr`.
+- Problems found:
+  - The original X-Fi FC route did not improve the WiFi-only ceiling. The copied V0 run `20260516_195909` reached only `best_val_acc=0.380952`, while the previous token-pool V0 run `20260516_133121` reached `best_val_acc=0.392157`.
+  - This suggests the low single-person WiFi result is not mainly caused by the token-pool head implementation.
+- Validation commands:
+  - `python -m compileall train.py models losses datasets scripts`
+  - `python -c "from models import XFiWiFiOriginalFC; ..."`
+- Validation result:
+  - Static compile passed.
+  - `XFiWiFiOriginalFC` output matched the wrapped X-Fi backbone output exactly in eval mode.
+
+## v0.1.23 - 2026-05-17
+
+- Implementation commit: `0da1b7f`
+- Changes:
+  - Changed the default WiFi amplitude preprocessing from `log1p_zscore` to `none`.
+  - Added `train.py --normalize {none,zscore,log1p_zscore}` so normalization can be controlled from the command line and recorded in each run's saved config.
+  - Updated README to document that `../dataset/wifi_csi/amp/*.npy` already contains preprocessed CSI amplitude and should be used directly for the X-Fi input-distribution check.
+- Problems found:
+  - The project was reading the processed amplitude `.npy` files but then applying `log1p_zscore` in `datasets/wifi_amp_loader.py`.
+  - WiMANS official WiFi code and X-Fi data loaders read the amplitude arrays directly and do not apply this extra per-sample log z-score normalization at load time.
+  - The extra normalization can shift the input distribution away from the X-Fi WiFi ResNet-18 pretraining distribution.
+- Validation commands:
+  - `python -m compileall train.py datasets models losses scripts utils`
+  - `python -c "import argparse, train; ..."`
+- Validation result:
+  - Static compile passed.
+  - CLI config override check confirmed `--normalize none` and `--normalize log1p_zscore` update `cfg["data"]["normalize"]` as expected.
+
 ## Suggested Future Milestones
 
 - `v0.2.0`: WiMANS data checks and label builder validated.

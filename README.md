@@ -47,6 +47,12 @@ Default paths in `config/config.yaml` are relative to this project directory:
 ../backbone_models/video/video_s3d.pt
 ```
 
+WiFi inputs are loaded from the already preprocessed amplitude files under
+`../dataset/wifi_csi/amp/*.npy`. The default `data.normalize` is `none`, so the
+loader only pads/truncates each sample and reshapes it to `[270, target_len]`
+before sending it to the X-Fi WiFi ResNet. Use `--normalize zscore` or
+`--normalize log1p_zscore` only for explicit ablation runs.
+
 The official reference folders remain outside git:
 
 ```text
@@ -118,6 +124,12 @@ V0:
 
 ```powershell
 python train.py --config config\config.yaml --stage v0
+```
+
+For the current X-Fi input-distribution check, keep the direct amplitude setting:
+
+```powershell
+python train.py --config config\config.yaml --stage v0 --wifi-student original_fc --normalize none --epochs 100 --batch-size 16 --scheduler-patience 20 --scheduler-min-lr 1e-6
 ```
 
 The shared config currently targets 4080S-side comparison runs. For a laptop smoke
