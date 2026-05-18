@@ -199,6 +199,17 @@ python train.py --config config\wimans_multi_bce.yaml --stage v0
   detailed file as `splits/val_predictions_best.csv` and a compact comparison
   file as `splits/val_predictions_best_compact.csv`.
 
+  `result.json` keeps WiMANS comparability by setting `accuracy.avg` to the
+  official slot-level activity accuracy. Additional fields such as
+  `slot_argmax_*` and `threshold_sweep` are diagnostic only; they do not replace
+  the official `sigmoid(logits) > threshold` result.
+
+  Positive-class BCE weight can be changed from the command line for diagnosis:
+
+  ```powershell
+  python train.py --config config\wimans_multi_bce.yaml --stage v0 --bce-pos-weight 12
+  ```
+
   To compact an existing detailed prediction file:
 
   ```powershell

@@ -1,6 +1,16 @@
 from .checkpoint import load_checkpoint, save_checkpoint
 from .config import load_config, resolve_path
-from .metrics import accuracy_for_mode, accuracy_top1, active_slot_accuracy, official_slot_accuracy, sample_exact_accuracy
+from .metrics import (
+    accuracy_for_mode,
+    accuracy_top1,
+    active_slot_accuracy,
+    official_slot_accuracy,
+    sample_exact_accuracy,
+    slot_argmax_active_accuracy,
+    slot_argmax_official_accuracy,
+    slot_argmax_prediction,
+    slot_argmax_sample_exact_accuracy,
+)
 from .model_info import build_model_summary, count_parameters
 from .prediction_export import compact_prediction_rows
 from .result_report import build_epoch_result, build_wimans_result_payload, update_result_payload, write_result_json
@@ -27,6 +37,10 @@ __all__ = [
     "sample_exact_accuracy",
     "seed_everything",
     "setup_run_logger",
+    "slot_argmax_active_accuracy",
+    "slot_argmax_official_accuracy",
+    "slot_argmax_prediction",
+    "slot_argmax_sample_exact_accuracy",
     "update_result_payload",
     "write_result_json",
 ]

@@ -78,6 +78,89 @@ def _multi_label_arrays(rows, num_slots=6, num_classes=9):
     return np.asarray(y_true, dtype=int), np.asarray(y_pred, dtype=int)
 
 
+def _multi_bce_true_vec(row, slot_idx, num_classes=9):
+    return [int(row.get(f"true_s{slot_idx + 1}_c{class_idx}", 0)) for class_idx in range(num_classes)]
+
+
+def _multi_bce_pred_vec(row, slot_idx, threshold=0.5, decode_mode="independent", class_names=None):
+    class_names = class_names or []
+    probs = [
+        float(row.get(f"prob_s{slot_idx + 1}_{class_name}", 0.0))
+        for class_name in class_names
+    ]
+    if decode_mode == "independent":
+        return [1 if prob > float(threshold) else 0 for prob in probs]
+    if decode_mode == "slot_argmax":
+        pred = [0] * len(probs)
+        if probs:
+            max_idx = int(np.argmax(probs))
+            if probs[max_idx] > float(threshold):
+                pred[max_idx] = 1
+        return pred
+    raise ValueError(f"Unsupported multi_bce decode_mode: {decode_mode}")
+
+
+def _multi_bce_metrics(rows, class_names, threshold=0.5, decode_mode="independent", num_slots=6):
+    slot_correct = 0
+    slot_total = 0
+    active_correct = 0
+    active_total = 0
+    sample_exact = 0
+    pred_empty_slots = 0
+    pred_active_slots = 0
+    pred_multi_activity_slots = 0
+    num_classes = len(class_names)
+
+    for row in rows:
+        item_exact = True
+        for slot_idx in range(num_slots):
+            true_vec = _multi_bce_true_vec(row, slot_idx, num_classes=num_classes)
+            pred_vec = _multi_bce_pred_vec(
+                row,
+                slot_idx,
+                threshold=threshold,
+                decode_mode=decode_mode,
+                class_names=class_names,
+            )
+            is_correct = pred_vec == true_vec
+            is_active = sum(true_vec) > 0
+            pred_count = sum(pred_vec)
+            slot_correct += int(is_correct)
+            slot_total += 1
+            active_total += int(is_active)
+            active_correct += int(is_correct and is_active)
+            pred_empty_slots += int(pred_count == 0)
+            pred_active_slots += int(pred_count > 0)
+            pred_multi_activity_slots += int(pred_count > 1)
+            item_exact = item_exact and is_correct
+        sample_exact += int(item_exact)
+
+    return {
+        "threshold": float(threshold),
+        "decode_mode": decode_mode,
+        "official_slot_acc": float(slot_correct / slot_total) if slot_total else 0.0,
+        "active_slot_acc": float(active_correct / active_total) if active_total else 0.0,
+        "sample_exact_acc": float(sample_exact / len(rows)) if rows else 0.0,
+        "pred_empty_slots": int(pred_empty_slots),
+        "pred_active_slots": int(pred_active_slots),
+        "pred_multi_activity_slots": int(pred_multi_activity_slots),
+    }
+
+
+def _multi_bce_threshold_sweep(rows, class_names):
+    thresholds = [round(item / 10, 1) for item in range(1, 10)]
+    return {
+        "independent_sigmoid": [
+            _multi_bce_metrics(rows, class_names, threshold=threshold, decode_mode="independent")
+            for threshold in thresholds
+        ],
+        "slot_argmax": [
+            _multi_bce_metrics(rows, class_names, threshold=threshold, decode_mode="slot_argmax")
+            for threshold in thresholds
+        ],
+    }
+
+
 def _multi_class_accuracy(rows, num_slots=6):
     groups = {}
     for row in rows:
@@ -150,11 +233,17 @@ def summarize_multi_bce_prediction_rows(prediction_rows, class_names, split_df=N
         output_dict=True,
     )
     official_slot_acc = float(slot_correct / slot_total) if slot_total else 0.0
+    threshold = float(rows[0].get("threshold", 0.5))
+    slot_argmax_metrics = _multi_bce_metrics(rows, class_names, threshold=threshold, decode_mode="slot_argmax")
     return {
         "accuracy": official_slot_acc,
         "official_slot_acc": official_slot_acc,
         "sample_exact_acc": float(sample_exact / len(rows)) if rows else 0.0,
         "active_slot_acc": float(active_correct / active_total) if active_total else 0.0,
+        "slot_argmax_official_slot_acc": slot_argmax_metrics["official_slot_acc"],
+        "slot_argmax_active_slot_acc": slot_argmax_metrics["active_slot_acc"],
+        "slot_argmax_sample_exact_acc": slot_argmax_metrics["sample_exact_acc"],
+        "threshold_sweep": _multi_bce_threshold_sweep(rows, class_names),
         "classification_report": report,
         "class_accuracy": _multi_class_accuracy(rows),
         "environment_accuracy": _multi_environment_accuracy(rows),
@@ -210,9 +299,18 @@ def build_epoch_result(epoch, train_loss, train_acc, val_loss, val_acc, predicti
         "class_accuracy": summary["class_accuracy"],
         "environment_accuracy": summary["environment_accuracy"],
     }
-    for key in ("official_slot_acc", "sample_exact_acc", "active_slot_acc"):
+    for key in (
+        "official_slot_acc",
+        "sample_exact_acc",
+        "active_slot_acc",
+        "slot_argmax_official_slot_acc",
+        "slot_argmax_sample_exact_acc",
+        "slot_argmax_active_slot_acc",
+    ):
         if key in summary:
             result[key] = float(summary[key])
+    if "threshold_sweep" in summary:
+        result["threshold_sweep"] = summary["threshold_sweep"]
     if lrs is not None:
         result["lr"] = {str(key): float(value) for key, value in lrs.items()}
     return result
@@ -237,6 +335,18 @@ def build_wimans_result_payload(model_name, task, cfg, model_summary=None):
         "projector": cfg.get("projector", {}),
         "cafd": cfg.get("cafd", {}),
         "complexity": (model_summary or {}).get("flops", {}),
+        "evaluation_protocol": {
+            "official_wimans_activity_accuracy": "reshape predictions and labels to [N*6, 9], apply sigmoid(logits) > threshold, then compute sklearn accuracy_score over exact 9-bit slot vectors",
+            "accuracy_avg_matches": "official_slot_acc",
+            "auxiliary_metrics": [
+                "active_slot_acc",
+                "sample_exact_acc",
+                "slot_argmax_official_slot_acc",
+                "slot_argmax_active_slot_acc",
+                "slot_argmax_sample_exact_acc",
+                "threshold_sweep",
+            ],
+        },
         "epochs": [],
         "accuracy": {"avg": 0.0, "std": 0.0},
     }
@@ -253,9 +363,18 @@ def update_result_payload(payload, epoch_results, top_checkpoints=None):
         payload["accuracy"] = {"avg": best["accuracy"], "std": 0.0}
         payload["best_class_accuracy"] = best.get("class_accuracy", {})
         payload["best_environment_accuracy"] = best.get("environment_accuracy", {})
-        for key in ("official_slot_acc", "sample_exact_acc", "active_slot_acc"):
+        for key in (
+            "official_slot_acc",
+            "sample_exact_acc",
+            "active_slot_acc",
+            "slot_argmax_official_slot_acc",
+            "slot_argmax_sample_exact_acc",
+            "slot_argmax_active_slot_acc",
+        ):
             if key in best:
                 payload[f"best_{key}"] = best[key]
+        if "threshold_sweep" in best:
+            payload["best_threshold_sweep"] = best["threshold_sweep"]
     if top_checkpoints is not None:
         payload["top_checkpoints"] = [
             {

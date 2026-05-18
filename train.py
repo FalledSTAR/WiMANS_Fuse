@@ -41,6 +41,7 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--normalize", choices=["none", "zscore", "log1p_zscore"], default=None)
     parser.add_argument("--threshold", type=float, default=None)
+    parser.add_argument("--bce-pos-weight", type=float, default=None)
     parser.add_argument("--lr-backbone", type=float, default=None)
     parser.add_argument("--lr-head", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
@@ -645,6 +646,8 @@ def main():
         cfg.setdefault("data", {})["normalize"] = args.normalize
     if args.threshold is not None:
         cfg.setdefault("test", {})["threshold"] = args.threshold
+    if args.bce_pos_weight is not None:
+        cfg.setdefault("train", {})["bce_pos_weight"] = args.bce_pos_weight
     if args.lr_backbone is not None:
         cfg.setdefault("train", {})["lr_backbone"] = args.lr_backbone
     if args.lr_head is not None:
@@ -805,6 +808,9 @@ def main():
         "official_slot_acc",
         "sample_exact_acc",
         "active_slot_acc",
+        "slot_argmax_official_slot_acc",
+        "slot_argmax_sample_exact_acc",
+        "slot_argmax_active_slot_acc",
         "lr_backbone",
         "lr_head_projector",
     ]
@@ -892,6 +898,9 @@ def main():
                 "official_slot_acc": epoch_result.get("official_slot_acc"),
                 "sample_exact_acc": epoch_result.get("sample_exact_acc"),
                 "active_slot_acc": epoch_result.get("active_slot_acc"),
+                "slot_argmax_official_slot_acc": epoch_result.get("slot_argmax_official_slot_acc"),
+                "slot_argmax_sample_exact_acc": epoch_result.get("slot_argmax_sample_exact_acc"),
+                "slot_argmax_active_slot_acc": epoch_result.get("slot_argmax_active_slot_acc"),
                 "lr_backbone": new_lrs.get("backbone", float("nan")),
                 "lr_head_projector": new_lrs.get("head_projector", float("nan")),
             }
