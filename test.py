@@ -8,7 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from train import build_loaders, build_model, collect_predictions, select_device  # noqa: E402
-from utils import append_csv_rows, load_checkpoint, load_config, seed_everything  # noqa: E402
+from utils import append_csv_rows, compact_prediction_rows, load_checkpoint, load_config, seed_everything  # noqa: E402
 
 
 def parse_args():
@@ -29,7 +29,7 @@ def main():
     _, val_loader, _, _ = build_loaders(cfg, use_video=args.stage == "v1")
     model = build_model(cfg, args.stage).to(device)
     load_checkpoint(args.checkpoint, model, map_location=device)
-    loss, acc, prediction_rows = collect_predictions(model, val_loader, device, args.stage)
+    loss, acc, prediction_rows = collect_predictions(model, val_loader, device, args.stage, cfg)
     print(f"test_loss={loss:.6f} test_acc={acc:.6f}")
     if args.predictions_out is not None:
         prediction_path = Path(args.predictions_out)
@@ -43,6 +43,12 @@ def main():
         prediction_path.unlink(missing_ok=True)
         append_csv_rows(prediction_path, prediction_rows, list(prediction_rows[0].keys()))
         print(f"predictions_saved={prediction_path}")
+        compact_rows = compact_prediction_rows(prediction_rows)
+        if compact_rows:
+            compact_path = prediction_path.with_name(f"{prediction_path.stem}_compact{prediction_path.suffix}")
+            compact_path.unlink(missing_ok=True)
+            append_csv_rows(compact_path, compact_rows, list(compact_rows[0].keys()))
+            print(f"compact_predictions_saved={compact_path}")
 
 
 if __name__ == "__main__":

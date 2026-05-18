@@ -19,6 +19,7 @@ from utils import (  # noqa: E402
     build_epoch_result,
     build_model_summary,
     build_wimans_result_payload,
+    compact_prediction_rows,
     create_run_dir,
     load_config,
     resolve_path,
@@ -40,6 +41,7 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--normalize", choices=["none", "zscore", "log1p_zscore"], default=None)
     parser.add_argument("--threshold", type=float, default=None)
+    parser.add_argument("--bce-pos-weight", type=float, default=None)
     parser.add_argument("--lr-backbone", type=float, default=None)
     parser.add_argument("--lr-head", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
@@ -644,6 +646,8 @@ def main():
         cfg.setdefault("data", {})["normalize"] = args.normalize
     if args.threshold is not None:
         cfg.setdefault("test", {})["threshold"] = args.threshold
+    if args.bce_pos_weight is not None:
+        cfg.setdefault("train", {})["bce_pos_weight"] = args.bce_pos_weight
     if args.lr_backbone is not None:
         cfg.setdefault("train", {})["lr_backbone"] = args.lr_backbone
     if args.lr_head is not None:
@@ -804,6 +808,9 @@ def main():
         "official_slot_acc",
         "sample_exact_acc",
         "active_slot_acc",
+        "slot_argmax_official_slot_acc",
+        "slot_argmax_sample_exact_acc",
+        "slot_argmax_active_slot_acc",
         "lr_backbone",
         "lr_head_projector",
     ]
@@ -836,8 +843,14 @@ def main():
         # Step scheduler based on val_acc (higher is better, mode='max').
         scheduler.step(val_acc)
 
+        logging_cfg = cfg.get("logging", {})
+        save_epoch_predictions = bool(logging_cfg.get("save_epoch_predictions", True))
+        save_best_detailed_predictions = bool(logging_cfg.get("save_best_detailed_predictions", True))
+        save_compact_predictions = bool(logging_cfg.get("save_compact_predictions", True))
         prediction_fieldnames = list(prediction_rows[0].keys()) if prediction_rows else []
-        if prediction_rows:
+        compact_prediction_rows_epoch = compact_prediction_rows(prediction_rows)
+        compact_prediction_fieldnames = list(compact_prediction_rows_epoch[0].keys()) if compact_prediction_rows_epoch else []
+        if prediction_rows and save_epoch_predictions:
             prediction_path = run_dir / "splits" / f"val_predictions_epoch_{epoch + 1:03d}.csv"
             append_csv_rows(prediction_path, prediction_rows, prediction_fieldnames)
             logger.info("saved_val_predictions=%s", prediction_path)
@@ -885,6 +898,9 @@ def main():
                 "official_slot_acc": epoch_result.get("official_slot_acc"),
                 "sample_exact_acc": epoch_result.get("sample_exact_acc"),
                 "active_slot_acc": epoch_result.get("active_slot_acc"),
+                "slot_argmax_official_slot_acc": epoch_result.get("slot_argmax_official_slot_acc"),
+                "slot_argmax_sample_exact_acc": epoch_result.get("slot_argmax_sample_exact_acc"),
+                "slot_argmax_active_slot_acc": epoch_result.get("slot_argmax_active_slot_acc"),
                 "lr_backbone": new_lrs.get("backbone", float("nan")),
                 "lr_head_projector": new_lrs.get("head_projector", float("nan")),
             }
@@ -904,10 +920,16 @@ def main():
                 extra={"epoch": epoch + 1, "val_acc": best_acc, "stage": args.stage},
             )
             if prediction_rows:
-                best_prediction_path = run_dir / "splits" / "val_predictions_best.csv"
-                best_prediction_path.unlink(missing_ok=True)
-                append_csv_rows(best_prediction_path, prediction_rows, prediction_fieldnames)
-                logger.info("saved_best_val_predictions=%s", best_prediction_path)
+                if save_best_detailed_predictions:
+                    best_prediction_path = run_dir / "splits" / "val_predictions_best.csv"
+                    best_prediction_path.unlink(missing_ok=True)
+                    append_csv_rows(best_prediction_path, prediction_rows, prediction_fieldnames)
+                    logger.info("saved_best_val_predictions=%s", best_prediction_path)
+                if save_compact_predictions and compact_prediction_rows_epoch:
+                    compact_prediction_path = run_dir / "splits" / "val_predictions_best_compact.csv"
+                    compact_prediction_path.unlink(missing_ok=True)
+                    append_csv_rows(compact_prediction_path, compact_prediction_rows_epoch, compact_prediction_fieldnames)
+                    logger.info("saved_best_compact_val_predictions=%s", compact_prediction_path)
             logger.info("saved_best_checkpoint=%s val_acc=%.6f", checkpoint_dir / "best.pt", best_acc)
 
         update_result_payload(result_payload, epoch_results)
