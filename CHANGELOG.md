@@ -1,7 +1,27 @@
-# Changelog
+﻿# Changelog
 
 All notable changes, problems, validation commands, and commit hashes should be
 recorded here before moving the project to the 4080S machine.
+
+## v0.1.22 - 2026-05-18
+
+- Implementation commit: `pending`
+- Changes:
+  - Kept the official WiMANS multi-user activity metric unchanged: `sigmoid(logits) > threshold`, reshape to `[N*6, 9]`, then exact 9-bit slot-vector accuracy.
+  - Added auxiliary `slot_argmax_*` metrics for post-hoc diagnosis while preserving the 9-bit output space.
+  - Added threshold sweep diagnostics for both official independent-sigmoid decoding and per-slot argmax decoding in `result.json`.
+  - Added `--bce-pos-weight` CLI override for quick positive-class weight experiments.
+  - Fixed `test.py` to pass the active config into `collect_predictions` and to save compact prediction CSV files.
+- Problems found:
+  - The previous multi-user BCE run stayed comparable to WiMANS, but `official_slot_acc` was strongly influenced by empty user slots.
+  - Auxiliary metrics are needed to tell whether changes improve active-user predictions or only empty-slot predictions.
+- Validation commands:
+  - `python -m compileall train.py test.py datasets losses utils scripts`
+  - `python train.py --config config\wimans_multi_bce.yaml --stage v0 --sample-limit 24 --epochs 1 --batch-size 4 --scheduler-patience 1 --bce-pos-weight 12`
+- Validation result:
+  - Static compile passed.
+  - Tiny smoke run completed.
+  - `result.json` preserved `accuracy.avg == official_slot_acc` and added diagnostic threshold sweep and slot-argmax metrics.
 
 ## v0.1.21 - 2026-05-18
 
