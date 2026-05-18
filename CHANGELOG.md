@@ -5,7 +5,7 @@ recorded here before moving the project to the 4080S machine.
 
 ## v0.1.24 - 2026-05-18
 
-- Implementation commit: `pending`
+- Implementation commit: `ff7965c`
 - Changes:
   - Added WiMANS-style `CNN1DWiFi` model for standalone WiFi CSI experiments.
   - Added `config/wimans_multi_cnn1d.yaml` for multi-user classroom 2.4 GHz WiFi-only BCE training.
