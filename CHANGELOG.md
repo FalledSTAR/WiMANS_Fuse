@@ -3,6 +3,32 @@
 All notable changes, problems, validation commands, and commit hashes should be
 recorded here before moving the project to the 4080S machine.
 
+## v0.1.20 - 2026-05-18
+
+- Implementation commit: `9a21326`
+- Changes:
+  - Added `config/wimans_multi_bce.yaml` for a WiMANS-style multi-user WiFi-only BCE baseline.
+  - Added `multi_bce` classification loss based on `BCEWithLogitsLoss` with configurable `bce_pos_weight`.
+  - Added multi-user metrics:
+    - `official_slot_acc`: exact slot-level accuracy over all 6 user slots, including empty slots.
+    - `active_slot_acc`: exact slot-level accuracy only over non-empty true user slots.
+    - `sample_exact_acc`: exact full-sample accuracy over all 54 binary outputs.
+  - Added multi-user prediction export with per-slot true/predicted activities and per-class probabilities.
+  - Added multi-user BCE metrics to `result.json` and `metrics/epochs.csv`.
+  - Documented the new run command in `README.md`.
+- Problems found:
+  - Previous single-user WiFi-only and video-distillation experiments remained around 0.3-0.4 validation accuracy.
+  - Normalization changes did not appear to be the main bottleneck.
+  - `official_slot_acc` can be inflated by correctly predicting empty user slots, so `active_slot_acc` and `sample_exact_acc` must be checked together.
+- Validation commands:
+  - `python -m compileall train.py datasets models losses scripts utils`
+  - `python train.py --config config\wimans_multi_bce.yaml --stage v0 --sample-limit 24 --epochs 1 --batch-size 4 --scheduler-patience 1`
+  - `python -c "import torch; from losses import classification_loss; logits=torch.randn(2,54,requires_grad=True); labels=torch.zeros(2,6,9); labels[:,0,1]=1; loss=classification_loss(logits, labels, 'multi_bce', pos_weight=6.0); loss.backward(); print(float(loss.detach()), bool(torch.isfinite(logits.grad).all()))"`
+- Validation result:
+  - Static compile passed.
+  - Tiny smoke run completed and generated `config.yaml`, `model.txt`, `model_summary.yaml`, split CSV files, `metrics/epochs.csv`, `result.json`, prediction CSV files, and `checkpoints/best.pt`.
+  - BCE loss backward check passed with finite gradients.
+
 ## v0.1.0 - 2026-04-30
 
 - Implementation commit: `83859ac`

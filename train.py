@@ -14,7 +14,7 @@ from datasets import ID_TO_ACTIVITY, WiMANSHARDataset, build_single_user_datafra
 from losses import CAFDLoss, RSDLoss, classification_loss  # noqa: E402
 from models import VideoWiFiCAFDModel, XFiWiFiOriginalFC, XFiWiFiStudent  # noqa: E402
 from utils import (  # noqa: E402
-    accuracy_top1,
+    accuracy_for_mode,
     append_csv_rows,
     build_epoch_result,
     build_model_summary,
@@ -39,6 +39,10 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--normalize", choices=["none", "zscore", "log1p_zscore"], default=None)
+    parser.add_argument("--threshold", type=float, default=None)
+    parser.add_argument("--lr-backbone", type=float, default=None)
+    parser.add_argument("--lr-head", type=float, default=None)
+    parser.add_argument("--weight-decay", type=float, default=None)
     parser.add_argument("--wifi-student", choices=["token_pool", "original_fc"], default=None)
     parser.add_argument("--scheduler-factor", type=float, default=None)
     parser.add_argument("--scheduler-patience", type=int, default=None)
@@ -60,6 +64,25 @@ def select_device(name: str):
     return torch.device(name)
 
 
+def get_label_mode(cfg) -> str:
+    return str(cfg.get("data", {}).get("label_mode", "single_ce"))
+
+
+def get_threshold(cfg) -> float:
+    return float(cfg.get("test", {}).get("threshold", 0.5))
+
+
+def get_bce_pos_weight(cfg):
+    return cfg.get("train", {}).get("bce_pos_weight", None)
+
+
+def _activity_vector_to_text(vector) -> str:
+    active = [ID_TO_ACTIVITY[idx] for idx, value in enumerate(vector) if int(value) == 1]
+    if not active:
+        return "empty_slot"
+    return "|".join(active)
+
+
 def build_loaders(cfg, use_video: bool):
     data_root = resolve_path(PROJECT_ROOT, cfg["data"]["root"])
     annotation = resolve_path(PROJECT_ROOT, cfg["data"]["annotation"])
@@ -70,8 +93,14 @@ def build_loaders(cfg, use_video: bool):
         num_users=cfg["data"]["num_users"],
         sample_limit=cfg["data"]["sample_limit"],
     )
-    labels = dataframe.apply(build_single_user_label, axis=1)
-    stratify_labels = labels if labels.value_counts().min() >= 2 and len(labels.unique()) <= int(len(dataframe) * float(cfg["data"]["test_size"])) else None
+    label_mode = get_label_mode(cfg)
+    if label_mode == "single_ce":
+        labels = dataframe.apply(build_single_user_label, axis=1)
+        stratify_labels = labels if labels.value_counts().min() >= 2 and len(labels.unique()) <= int(len(dataframe) * float(cfg["data"]["test_size"])) else None
+    elif label_mode == "multi_bce":
+        stratify_labels = None
+    else:
+        raise ValueError(f"Unsupported data.label_mode: {label_mode}")
     train_df, val_df = train_test_split(
         dataframe,
         test_size=float(cfg["data"]["test_size"]),
@@ -82,7 +111,7 @@ def build_loaders(cfg, use_video: bool):
 
     dataset_kwargs = {
         "data_root": data_root,
-        "label_mode": "single_ce",
+        "label_mode": label_mode,
         "use_video": use_video,
         "target_len": cfg["data"]["target_len"],
         "pad_mode": cfg["data"]["pad_mode"],
@@ -301,6 +330,9 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
     log_interval = max(int(cfg["train"].get("log_interval", 50)), 1)
     cafd_cfg = get_cafd_cfg(cfg)
     rsd_cfg = get_rsd_cfg(cfg)
+    label_mode = get_label_mode(cfg)
+    threshold = get_threshold(cfg)
+    bce_pos_weight = get_bce_pos_weight(cfg)
     lambda_rsd_effective = effective_rsd_lambda(rsd_cfg, epoch)
     samples_seen = 0
     for batch_idx, batch in enumerate(loader, start=1):
@@ -312,7 +344,7 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
 
         if stage == "v0":
             logits = model(wifi)
-            loss = classification_loss(logits, labels, "single_ce")
+            loss = classification_loss(logits, labels, label_mode, pos_weight=bce_pos_weight)
             cls_loss_value = float(loss.item())
             cafd_loss_value = None
             cafd_weighted_mse_value = None
@@ -332,7 +364,7 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             video = batch["video"].float().to(device)
             outputs = model(wifi, video)
             logits = outputs["logits"]
-            cls_loss = classification_loss(logits, labels, "single_ce")
+            cls_loss = classification_loss(logits, labels, label_mode, pos_weight=bce_pos_weight)
             loss = cls_loss
             cafd_loss = None
             cafd_details = None
@@ -363,11 +395,11 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             rsd_decorrelation_value = None if rsd_details is None else float(rsd_details["decorrelation"].item())
             rsd_diag_mean_value = None if rsd_details is None else float(rsd_details["diag_mean"].item())
             rsd_offdiag_abs_mean_value = None if rsd_details is None else float(rsd_details["offdiag_abs_mean"].item())
-            teacher_acc_value = accuracy_top1(outputs["teacher_logits"].detach(), labels.detach())
+            teacher_acc_value = accuracy_for_mode(outputs["teacher_logits"].detach(), labels.detach(), label_mode, threshold=threshold)
 
         loss.backward()
         optimizer.step()
-        batch_acc = accuracy_top1(logits.detach(), labels.detach())
+        batch_acc = accuracy_for_mode(logits.detach(), labels.detach(), label_mode, threshold=threshold)
         total_loss += float(loss.item()) * batch_size
         total_correct += batch_acc * batch_size
         total_samples += batch_size
@@ -453,11 +485,14 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, stage):
+def evaluate(model, loader, device, stage, cfg):
     model.eval()
     total_loss = 0.0
     total_correct = 0.0
     total_samples = 0
+    label_mode = get_label_mode(cfg)
+    threshold = get_threshold(cfg)
+    bce_pos_weight = get_bce_pos_weight(cfg)
     for batch in loader:
         wifi = batch["wifi"].float().to(device)
         labels = batch["label"].to(device)
@@ -467,20 +502,23 @@ def evaluate(model, loader, device, stage):
         else:
             video = batch["video"].float().to(device)
             logits = model(wifi, video)["logits"]
-        loss = classification_loss(logits, labels, "single_ce")
+        loss = classification_loss(logits, labels, label_mode, pos_weight=bce_pos_weight)
         total_loss += float(loss.item()) * batch_size
-        total_correct += accuracy_top1(logits, labels) * batch_size
+        total_correct += accuracy_for_mode(logits, labels, label_mode, threshold=threshold) * batch_size
         total_samples += batch_size
     return total_loss / max(total_samples, 1), total_correct / max(total_samples, 1)
 
 
 @torch.no_grad()
-def collect_predictions(model, loader, device, stage):
+def collect_predictions(model, loader, device, stage, cfg):
     model.eval()
     rows = []
     total_loss = 0.0
-    total_correct = 0
+    total_metric_weighted = 0.0
     total_samples = 0
+    label_mode = get_label_mode(cfg)
+    threshold = get_threshold(cfg)
+    bce_pos_weight = get_bce_pos_weight(cfg)
     for batch in loader:
         wifi = batch["wifi"].float().to(device)
         labels = batch["label"].to(device)
@@ -494,7 +532,58 @@ def collect_predictions(model, loader, device, stage):
             logits = outputs["logits"]
             teacher_logits = outputs.get("teacher_logits")
 
-        loss = classification_loss(logits, labels, "single_ce")
+        loss = classification_loss(logits, labels, label_mode, pos_weight=bce_pos_weight)
+        batch_metric = accuracy_for_mode(logits, labels, label_mode, threshold=threshold)
+        total_loss += float(loss.item()) * batch_size
+        total_metric_weighted += batch_metric * batch_size
+        total_samples += batch_size
+
+        sample_ids = batch["sample_id"]
+        if isinstance(sample_ids, str):
+            sample_ids = [sample_ids]
+
+        if label_mode == "multi_bce":
+            probs = torch.sigmoid(logits).reshape(batch_size, 6, 9)
+            pred_mask = (probs > threshold).long()
+            true_mask = labels.reshape(batch_size, 6, 9).long()
+            slot_correct = pred_mask.eq(true_mask).all(dim=-1)
+            active_slots = true_mask.sum(dim=-1) > 0
+            exact_sample = slot_correct.all(dim=-1)
+            for item_idx, sample_id in enumerate(sample_ids):
+                item_true = true_mask[item_idx].detach().cpu()
+                item_pred = pred_mask[item_idx].detach().cpu()
+                item_probs = probs[item_idx].detach().cpu()
+                item_slot_correct = slot_correct[item_idx].detach().cpu()
+                item_active = active_slots[item_idx].detach().cpu()
+                active_total = int(item_active.long().sum().item())
+                active_correct = int((item_slot_correct & item_active).long().sum().item())
+                row = {
+                    "sample_id": sample_id,
+                    "task_mode": "multi_bce",
+                    "threshold": threshold,
+                    "loss": float(loss.item()),
+                    "slot_correct_count": int(item_slot_correct.long().sum().item()),
+                    "slot_total": 6,
+                    "official_slot_accuracy": float(item_slot_correct.float().mean().item()),
+                    "active_slot_correct_count": active_correct,
+                    "active_slot_total": active_total,
+                    "active_slot_accuracy": "" if active_total == 0 else float(active_correct / active_total),
+                    "exact_sample_correct": int(bool(exact_sample[item_idx].item())),
+                }
+                for slot_idx in range(6):
+                    true_vec = item_true[slot_idx].tolist()
+                    pred_vec = item_pred[slot_idx].tolist()
+                    row[f"slot_{slot_idx + 1}_true_activity"] = _activity_vector_to_text(true_vec)
+                    row[f"slot_{slot_idx + 1}_pred_activity"] = _activity_vector_to_text(pred_vec)
+                    row[f"slot_{slot_idx + 1}_correct"] = int(bool(item_slot_correct[slot_idx].item()))
+                    row[f"slot_{slot_idx + 1}_active"] = int(bool(item_active[slot_idx].item()))
+                    for class_id, class_name in ID_TO_ACTIVITY.items():
+                        row[f"true_s{slot_idx + 1}_c{class_id}"] = int(true_vec[class_id])
+                        row[f"pred_s{slot_idx + 1}_c{class_id}"] = int(pred_vec[class_id])
+                        row[f"prob_s{slot_idx + 1}_{class_name}"] = float(item_probs[slot_idx, class_id].item())
+                rows.append(row)
+            continue
+
         probs = torch.softmax(logits, dim=-1)
         pred_ids = probs.argmax(dim=-1)
         correct = pred_ids.eq(labels.long())
@@ -505,14 +594,6 @@ def collect_predictions(model, loader, device, stage):
             teacher_probs = torch.softmax(teacher_logits, dim=-1)
             teacher_pred_ids = teacher_probs.argmax(dim=-1)
             teacher_correct = teacher_pred_ids.eq(labels.long())
-        total_loss += float(loss.item()) * batch_size
-        total_correct += int(correct.long().sum().item())
-        total_samples += batch_size
-
-        sample_ids = batch["sample_id"]
-        if isinstance(sample_ids, str):
-            sample_ids = [sample_ids]
-
         for item_idx, sample_id in enumerate(sample_ids):
             true_id = int(labels[item_idx].detach().cpu().item())
             pred_id = int(pred_ids[item_idx].detach().cpu().item())
@@ -547,7 +628,7 @@ def collect_predictions(model, loader, device, stage):
                     row[f"teacher_prob_{class_id}_{class_name}"] = float(teacher_item_probs[class_id])
             rows.append(row)
 
-    return total_loss / max(total_samples, 1), total_correct / max(total_samples, 1), rows
+    return total_loss / max(total_samples, 1), total_metric_weighted / max(total_samples, 1), rows
 
 
 def main():
@@ -561,6 +642,14 @@ def main():
         cfg.setdefault("train", {})["batch_size"] = args.batch_size
     if args.normalize is not None:
         cfg.setdefault("data", {})["normalize"] = args.normalize
+    if args.threshold is not None:
+        cfg.setdefault("test", {})["threshold"] = args.threshold
+    if args.lr_backbone is not None:
+        cfg.setdefault("train", {})["lr_backbone"] = args.lr_backbone
+    if args.lr_head is not None:
+        cfg.setdefault("train", {})["lr_head"] = args.lr_head
+    if args.weight_decay is not None:
+        cfg.setdefault("train", {})["weight_decay"] = args.weight_decay
     if args.wifi_student is not None:
         cfg.setdefault("model", {})["wifi_student"] = args.wifi_student
     if args.scheduler_factor is not None:
@@ -647,6 +736,10 @@ def main():
     logger.info("model_summary:\n%s", yaml.safe_dump(model_summary, allow_unicode=True, sort_keys=False))
     model = model.to(device)
 
+    label_mode = get_label_mode(cfg)
+    if label_mode == "multi_bce" and int(cfg["model"]["num_classes"]) != 54:
+        raise ValueError("data.label_mode='multi_bce' requires model.num_classes=54 for 6 user slots x 9 activities")
+    logger.info("label_mode=%s threshold=%.4f", label_mode, get_threshold(cfg))
     class_names = [ID_TO_ACTIVITY[class_id] for class_id in sorted(ID_TO_ACTIVITY)]
     cafd_cfg = get_cafd_cfg(cfg)
     rsd_cfg = get_rsd_cfg(cfg)
@@ -661,7 +754,7 @@ def main():
         model_name = "_with_".join(model_parts)
     result_payload = build_wimans_result_payload(
         model_name=model_name,
-        task=f"{args.stage}_single_person_har",
+        task=f"{args.stage}_{'multi_user_activity' if label_mode == 'multi_bce' else 'single_person_har'}",
         cfg=cfg,
         model_summary=model_summary,
     )
@@ -701,7 +794,19 @@ def main():
     best_acc = -1.0
     checkpoint_dir = run_dir / "checkpoints"
     epoch_rows = []
-    epoch_csv_fieldnames = ["epoch", "train_loss", "train_acc", "val_loss", "val_acc", "best_acc", "lr_backbone", "lr_head_projector"]
+    epoch_csv_fieldnames = [
+        "epoch",
+        "train_loss",
+        "train_acc",
+        "val_loss",
+        "val_acc",
+        "best_acc",
+        "official_slot_acc",
+        "sample_exact_acc",
+        "active_slot_acc",
+        "lr_backbone",
+        "lr_head_projector",
+    ]
 
     for epoch in range(int(cfg["train"]["epochs"])):
         # Log current LRs before each epoch so we can see when scheduler fires.
@@ -726,7 +831,7 @@ def main():
             logger=logger,
             batch_csv_path=run_dir / "metrics" / "train_batches.csv",
         )
-        val_loss, val_acc, prediction_rows = collect_predictions(model, val_loader, device, args.stage)
+        val_loss, val_acc, prediction_rows = collect_predictions(model, val_loader, device, args.stage, cfg)
 
         # Step scheduler based on val_acc (higher is better, mode='max').
         scheduler.step(val_acc)
@@ -756,6 +861,19 @@ def main():
                     new_lr,
                 )
 
+        epoch_result = build_epoch_result(
+            epoch + 1,
+            train_loss,
+            train_acc,
+            val_loss,
+            val_acc,
+            prediction_rows,
+            class_names,
+            split_df=val_df,
+            lrs=new_lrs,
+        )
+        epoch_results.append(epoch_result)
+
         epoch_rows.append(
             {
                 "epoch": epoch + 1,
@@ -764,6 +882,9 @@ def main():
                 "val_loss": val_loss,
                 "val_acc": val_acc,
                 "best_acc": max(best_acc, val_acc),
+                "official_slot_acc": epoch_result.get("official_slot_acc"),
+                "sample_exact_acc": epoch_result.get("sample_exact_acc"),
+                "active_slot_acc": epoch_result.get("active_slot_acc"),
                 "lr_backbone": new_lrs.get("backbone", float("nan")),
                 "lr_head_projector": new_lrs.get("head_projector", float("nan")),
             }
@@ -772,19 +893,6 @@ def main():
             run_dir / "metrics" / "epochs.csv",
             [epoch_rows[-1]],
             epoch_csv_fieldnames,
-        )
-        epoch_results.append(
-            build_epoch_result(
-                epoch + 1,
-                train_loss,
-                train_acc,
-                val_loss,
-                val_acc,
-                prediction_rows,
-                class_names,
-                split_df=val_df,
-                lrs=new_lrs,
-            )
         )
 
         if val_acc > best_acc:

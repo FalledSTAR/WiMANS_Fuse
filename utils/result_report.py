@@ -66,6 +66,102 @@ def _group_accuracy(prediction_rows, group_key):
     return result
 
 
+def _multi_label_arrays(rows, num_slots=6, num_classes=9):
+    y_true = []
+    y_pred = []
+    for row in rows:
+        for slot_idx in range(num_slots):
+            true_vec = [int(row.get(f"true_s{slot_idx + 1}_c{class_idx}", 0)) for class_idx in range(num_classes)]
+            pred_vec = [int(row.get(f"pred_s{slot_idx + 1}_c{class_idx}", 0)) for class_idx in range(num_classes)]
+            y_true.append(true_vec)
+            y_pred.append(pred_vec)
+    return np.asarray(y_true, dtype=int), np.asarray(y_pred, dtype=int)
+
+
+def _multi_class_accuracy(rows, num_slots=6):
+    groups = {}
+    for row in rows:
+        for slot_idx in range(num_slots):
+            key = str(row.get(f"slot_{slot_idx + 1}_true_activity", "empty_slot"))
+            groups.setdefault(key, {"correct": 0, "total": 0})
+            groups[key]["total"] += 1
+            groups[key]["correct"] += int(row.get(f"slot_{slot_idx + 1}_correct", 0))
+
+    result = {}
+    for group, stats in sorted(groups.items()):
+        total = stats["total"]
+        correct = stats["correct"]
+        result[group] = {
+            "correct": correct,
+            "total": total,
+            "accuracy": float(correct / total) if total else 0.0,
+        }
+    return result
+
+
+def _multi_environment_accuracy(rows):
+    groups = {}
+    for row in rows:
+        group = row.get("environment")
+        if group is None or group == "":
+            continue
+        groups.setdefault(str(group), {"correct": 0, "total": 0})
+        groups[str(group)]["correct"] += int(row.get("slot_correct_count", 0))
+        groups[str(group)]["total"] += int(row.get("slot_total", 0))
+
+    result = {}
+    for group, stats in sorted(groups.items()):
+        total = stats["total"]
+        correct = stats["correct"]
+        result[group] = {
+            "correct": correct,
+            "total": total,
+            "accuracy": float(correct / total) if total else 0.0,
+        }
+    return result
+
+
+def summarize_multi_bce_prediction_rows(prediction_rows, class_names, split_df=None):
+    rows = attach_split_metadata(prediction_rows, split_df)
+    if not rows:
+        return {
+            "accuracy": 0.0,
+            "official_slot_acc": 0.0,
+            "sample_exact_acc": 0.0,
+            "active_slot_acc": 0.0,
+            "classification_report": {},
+            "class_accuracy": {},
+            "environment_accuracy": {},
+            "num_samples": 0,
+        }
+
+    slot_correct = sum(int(row.get("slot_correct_count", 0)) for row in rows)
+    slot_total = sum(int(row.get("slot_total", 0)) for row in rows)
+    active_correct = sum(int(row.get("active_slot_correct_count", 0)) for row in rows)
+    active_total = sum(int(row.get("active_slot_total", 0)) for row in rows)
+    sample_exact = sum(int(row.get("exact_sample_correct", 0)) for row in rows)
+    y_true, y_pred = _multi_label_arrays(rows, num_classes=len(class_names))
+    report = classification_report(
+        y_true,
+        y_pred,
+        target_names=class_names,
+        digits=6,
+        zero_division=0,
+        output_dict=True,
+    )
+    official_slot_acc = float(slot_correct / slot_total) if slot_total else 0.0
+    return {
+        "accuracy": official_slot_acc,
+        "official_slot_acc": official_slot_acc,
+        "sample_exact_acc": float(sample_exact / len(rows)) if rows else 0.0,
+        "active_slot_acc": float(active_correct / active_total) if active_total else 0.0,
+        "classification_report": report,
+        "class_accuracy": _multi_class_accuracy(rows),
+        "environment_accuracy": _multi_environment_accuracy(rows),
+        "num_samples": len(rows),
+    }
+
+
 def summarize_prediction_rows(prediction_rows, class_names, split_df=None):
     rows = attach_split_metadata(prediction_rows, split_df)
     if not rows:
@@ -76,6 +172,9 @@ def summarize_prediction_rows(prediction_rows, class_names, split_df=None):
             "environment_accuracy": {},
             "num_samples": 0,
         }
+
+    if str(rows[0].get("task_mode", "")) == "multi_bce":
+        return summarize_multi_bce_prediction_rows(rows, class_names, split_df=None)
 
     labels = list(range(len(class_names)))
     y_true, y_pred = _labels_from_rows(rows)
@@ -111,6 +210,9 @@ def build_epoch_result(epoch, train_loss, train_acc, val_loss, val_acc, predicti
         "class_accuracy": summary["class_accuracy"],
         "environment_accuracy": summary["environment_accuracy"],
     }
+    for key in ("official_slot_acc", "sample_exact_acc", "active_slot_acc"):
+        if key in summary:
+            result[key] = float(summary[key])
     if lrs is not None:
         result["lr"] = {str(key): float(value) for key, value in lrs.items()}
     return result
@@ -151,6 +253,9 @@ def update_result_payload(payload, epoch_results, top_checkpoints=None):
         payload["accuracy"] = {"avg": best["accuracy"], "std": 0.0}
         payload["best_class_accuracy"] = best.get("class_accuracy", {})
         payload["best_environment_accuracy"] = best.get("environment_accuracy", {})
+        for key in ("official_slot_acc", "sample_exact_acc", "active_slot_acc"):
+            if key in best:
+                payload[f"best_{key}"] = best[key]
     if top_checkpoints is not None:
         payload["top_checkpoints"] = [
             {
