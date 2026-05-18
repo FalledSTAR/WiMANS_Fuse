@@ -191,12 +191,21 @@ for metrics.
 python train.py --config config\wimans_multi_bce.yaml --stage v0
 ```
 
-The primary metric is `official_slot_acc`, matching the WiMANS-style exact
-9-way vector match per user slot after `sigmoid(logits) > threshold`. The run
-also saves `sample_exact_acc`, `active_slot_acc`, per-slot prediction columns,
-and per-activity slot accuracy in `result.json`.
+  The primary metric is `official_slot_acc`, matching the WiMANS-style exact
+  9-way vector match per user slot after `sigmoid(logits) > threshold`. The run
+  also saves `sample_exact_acc`, `active_slot_acc`, per-slot prediction columns,
+  and per-activity slot accuracy in `result.json`. For readability, this config
+  does not save detailed prediction CSV files for every epoch. It saves the best
+  detailed file as `splits/val_predictions_best.csv` and a compact comparison
+  file as `splits/val_predictions_best_compact.csv`.
 
-For the supervised projected-video teacher route, use a checkpoint trained in
+  To compact an existing detailed prediction file:
+
+  ```powershell
+  python scripts\simplify_predictions.py --input output\wimans_classroom_24g_multi_bce\v0\<run_id>\splits\val_predictions_best.csv
+  ```
+
+  For the supervised projected-video teacher route, use a checkpoint trained in
 `train_video_teacher.py --mode projector`. When `--projector-target projected`
 is selected, V1 now requires the checkpoint to contain trained
 `video_projector.*` weights. The trained `projector_classifier.*` logits are

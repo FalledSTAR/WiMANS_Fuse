@@ -82,3 +82,6 @@ test:
 logging:
   compute_flops: true
   flops_video_frames: 16
+  save_epoch_predictions: false
+  save_best_detailed_predictions: true
+  save_compact_predictions: true
