@@ -180,6 +180,22 @@ the stable S3D teacher feature. If this remains far below the single-person HAR
 target, move next to a WiFi heatmap teacher instead of spending more time on
 CAFD-only component ablations.
 
+## WiMANS Multi-User BCE Check
+
+The WiMANS official WiFi activity task uses six user slots and nine activity
+labels per slot. The initial multi-user check is WiFi-only and uses
+`BCEWithLogitsLoss` with logits shaped as `[B, 54]`, reshaped to `[B, 6, 9]`
+for metrics.
+
+```powershell
+python train.py --config config\wimans_multi_bce.yaml --stage v0
+```
+
+The primary metric is `official_slot_acc`, matching the WiMANS-style exact
+9-way vector match per user slot after `sigmoid(logits) > threshold`. The run
+also saves `sample_exact_acc`, `active_slot_acc`, per-slot prediction columns,
+and per-activity slot accuracy in `result.json`.
+
 For the supervised projected-video teacher route, use a checkpoint trained in
 `train_video_teacher.py --mode projector`. When `--projector-target projected`
 is selected, V1 now requires the checkpoint to contain trained
