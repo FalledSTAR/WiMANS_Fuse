@@ -138,6 +138,8 @@ class XFiWiFiStudent(nn.Module):
     def __init__(self, weight_path: str, num_classes: int = 9, freeze_backbone: bool = False):
         super().__init__()
         backbone = load_xfi_wifi_resnet18(weight_path, map_location="cpu")
+        self.weight_path = str(weight_path)
+        self.loaded_backbone_type = type(backbone).__name__
         self.feature_extractor = nn.Sequential(*list(backbone.children())[:-2])
         self.feature_dim = 512
         self.norm = nn.LayerNorm(self.feature_dim)
@@ -165,6 +167,8 @@ class XFiWiFiOriginalFC(nn.Module):
     def __init__(self, weight_path: str, num_classes: int = 9, freeze_backbone: bool = False):
         super().__init__()
         self.backbone = load_xfi_wifi_resnet18(weight_path, map_location="cpu")
+        self.weight_path = str(weight_path)
+        self.loaded_backbone_type = type(self.backbone).__name__
         self.feature_dim = self.backbone.fc.in_features
         self.backbone.fc = nn.Linear(self.feature_dim, num_classes)
 

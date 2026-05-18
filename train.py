@@ -54,9 +54,11 @@ def parse_args():
     parser.add_argument("--teacher-checkpoint", default=None)
     parser.add_argument("--projector-target", choices=["video_feature", "projected"], default=None)
     parser.add_argument("--lambda-cafd", type=float, default=None)
+    parser.add_argument("--cafd-temperature", type=float, default=None)
     parser.add_argument("--lambda-rsd", type=float, default=None)
     parser.add_argument("--rsd-kappa", type=float, default=None)
     parser.add_argument("--rsd-warmup-epochs", type=int, default=None)
+    parser.add_argument("--rsd-reduction", choices=["sum", "mean"], default=None)
     return parser.parse_args()
 
 
@@ -170,7 +172,21 @@ def build_model(cfg, stage: str):
         projector_dropout=float(cfg["projector"].get("dropout", 0.2)),
         rsd_gamma=int(cfg.get("rsd", {}).get("gamma", 2)),
         wifi_student_mode=wifi_student_mode,
+        return_teacher_logits=bool(
+            cfg.get("video", {}).get(
+                "return_teacher_logits",
+                cfg.get("data", {}).get("label_mode", "single_ce") == "single_ce",
+            )
+        ),
     )
+
+
+def get_loaded_xfi_weight_info(model):
+    wifi_model = getattr(model, "wifi_student", model)
+    return {
+        "weight_path": getattr(wifi_model, "weight_path", None),
+        "backbone_type": getattr(wifi_model, "loaded_backbone_type", None),
+    }
 
 
 def get_wifi_backbone_params(student_model):
@@ -323,6 +339,26 @@ def select_rsd_pair(outputs: dict, source: str):
     raise ValueError(f"Unsupported rsd.source: {source}")
 
 
+def should_log_teacher_accuracy(cfg, label_mode: str) -> bool:
+    default = label_mode == "single_ce"
+    return bool(cfg.get("video", {}).get("log_teacher_accuracy", default))
+
+
+def safe_teacher_accuracy(teacher_logits: torch.Tensor, labels: torch.Tensor, label_mode: str, threshold: float):
+    if teacher_logits is None:
+        return None
+    if label_mode == "single_ce":
+        if labels.ndim == 1 and teacher_logits.ndim == 2 and teacher_logits.shape[0] == labels.shape[0]:
+            return accuracy_for_mode(teacher_logits.detach(), labels.detach(), label_mode, threshold=threshold)
+        return None
+    if label_mode == "multi_bce":
+        target_dim = int(labels.reshape(labels.shape[0], -1).shape[-1])
+        if teacher_logits.ndim == 2 and teacher_logits.shape[-1] == target_dim:
+            return accuracy_for_mode(teacher_logits.detach(), labels.detach(), label_mode, threshold=threshold)
+        return None
+    return None
+
+
 def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_loss_fn=None, rsd_loss_fn=None, logger=None, batch_csv_path=None):
     model.train()
     total_loss = 0.0
@@ -397,7 +433,11 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             rsd_decorrelation_value = None if rsd_details is None else float(rsd_details["decorrelation"].item())
             rsd_diag_mean_value = None if rsd_details is None else float(rsd_details["diag_mean"].item())
             rsd_offdiag_abs_mean_value = None if rsd_details is None else float(rsd_details["offdiag_abs_mean"].item())
-            teacher_acc_value = accuracy_for_mode(outputs["teacher_logits"].detach(), labels.detach(), label_mode, threshold=threshold)
+            teacher_acc_value = (
+                safe_teacher_accuracy(outputs.get("teacher_logits"), labels, label_mode, threshold)
+                if should_log_teacher_accuracy(cfg, label_mode)
+                else None
+            )
 
         loss.backward()
         optimizer.step()
@@ -672,6 +712,9 @@ def main():
         cfg.setdefault("projector", {})["target"] = args.projector_target
     if args.lambda_cafd is not None:
         cfg.setdefault("cafd", {})["lambda_cafd"] = args.lambda_cafd
+        cfg["cafd"]["enable"] = args.lambda_cafd > 0
+    if args.cafd_temperature is not None:
+        cfg.setdefault("cafd", {})["temperature"] = args.cafd_temperature
     if args.lambda_rsd is not None:
         cfg.setdefault("rsd", {})["lambda_rsd"] = args.lambda_rsd
         cfg["rsd"]["enable"] = args.lambda_rsd > 0
@@ -679,6 +722,8 @@ def main():
         cfg.setdefault("rsd", {})["kappa"] = args.rsd_kappa
     if args.rsd_warmup_epochs is not None:
         cfg.setdefault("rsd", {})["warmup_epochs"] = args.rsd_warmup_epochs
+    if args.rsd_reduction is not None:
+        cfg.setdefault("rsd", {})["reduction"] = args.rsd_reduction
     seed_everything(int(cfg["experiment"]["seed"]))
     device = select_device(cfg["train"]["device"])
 
@@ -711,6 +756,13 @@ def main():
 
     model = build_model(cfg, args.stage)
     logger.info("wifi_student_mode=%s", cfg["model"].get("wifi_student", "token_pool"))
+    xfi_weight_info = get_loaded_xfi_weight_info(model)
+    if xfi_weight_info["weight_path"]:
+        logger.info(
+            "loaded_xfi_wifi_weight=%s backbone_type=%s",
+            xfi_weight_info["weight_path"],
+            xfi_weight_info["backbone_type"],
+        )
     if args.stage == "v1" and getattr(model.video_teacher, "checkpoint_path", None):
         logger.info("loaded_video_teacher_checkpoint=%s", model.video_teacher.checkpoint_path)
         logger.info("video_teacher_checkpoint_extra=%s", model.video_teacher.checkpoint_extra)
@@ -719,10 +771,11 @@ def main():
         logger.info("projector_classifier_checkpoint_load_info=%s", model.projector_classifier_checkpoint_load_info)
     if args.stage == "v1":
         logger.info(
-            "projector target=%s freeze_video_projector=%s use_projector_logits=%s teacher_logits_source=%s wifi_projector_out_dim=%d rsd_projector_out_dim=%d rsd_projector_trainable_params=%d video_projector_trainable_params=%d",
+            "projector target=%s freeze_video_projector=%s use_projector_logits=%s return_teacher_logits=%s teacher_logits_source=%s wifi_projector_out_dim=%d rsd_projector_out_dim=%d rsd_projector_trainable_params=%d video_projector_trainable_params=%d",
             getattr(model, "projector_target", "unknown"),
             getattr(model, "freeze_video_projector", None),
             getattr(model, "use_projector_logits_requested", None),
+            getattr(model, "return_teacher_logits", None),
             getattr(model, "teacher_logits_source", "unknown"),
             model.wifi_projector.fc_out.out_features,
             model.rsd_projector.net[-1].out_features,
