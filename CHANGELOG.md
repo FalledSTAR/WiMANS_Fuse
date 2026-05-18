@@ -1,11 +1,11 @@
-﻿# Changelog
+# Changelog
 
 All notable changes, problems, validation commands, and commit hashes should be
 recorded here before moving the project to the 4080S machine.
 
 ## v0.1.23 - 2026-05-18
 
-- Implementation commit: `pending`
+- Implementation commit: `137e33f`
 - Changes:
   - Added multi-user V1 CAFD config `config/wimans_multi_cafd.yaml`.
   - Added multi-user V1 RSD config `config/wimans_multi_rsd.yaml`.
