@@ -12,7 +12,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from datasets import ID_TO_ACTIVITY, WiMANSHARDataset, build_single_user_dataframe, build_single_user_label  # noqa: E402
 from losses import CAFDLoss, RSDLoss, classification_loss  # noqa: E402
-from models import VideoWiFiCAFDModel, XFiWiFiOriginalFC, XFiWiFiStudent  # noqa: E402
+from models import CNN1DWiFi, VideoWiFiCAFDModel, XFiWiFiOriginalFC, XFiWiFiStudent  # noqa: E402
 from utils import (  # noqa: E402
     accuracy_for_mode,
     append_csv_rows,
@@ -45,6 +45,7 @@ def parse_args():
     parser.add_argument("--lr-backbone", type=float, default=None)
     parser.add_argument("--lr-head", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
+    parser.add_argument("--wifi-backbone", choices=["xfi_resnet18", "cnn1d"], default=None)
     parser.add_argument("--wifi-student", choices=["token_pool", "original_fc"], default=None)
     parser.add_argument("--scheduler-factor", type=float, default=None)
     parser.add_argument("--scheduler-patience", type=int, default=None)
@@ -146,15 +147,26 @@ def build_loaders(cfg, use_video: bool):
 
 
 def build_model(cfg, stage: str):
+    wifi_backbone = str(cfg["model"].get("wifi_backbone", "xfi_resnet18"))
     weight_path = resolve_path(PROJECT_ROOT, cfg["model"]["xfi_weight_path"])
     wifi_student_mode = str(cfg["model"].get("wifi_student", "token_pool"))
     if stage == "v0":
+        if wifi_backbone == "cnn1d":
+            return CNN1DWiFi(
+                input_channels=int(cfg["model"]["wifi_input_channels"]),
+                num_classes=int(cfg["model"]["num_classes"]),
+                dropout=float(cfg["model"].get("cnn1d_dropout", 0.2)),
+            )
+        if wifi_backbone != "xfi_resnet18":
+            raise ValueError("model.wifi_backbone must be 'xfi_resnet18' or 'cnn1d' for stage v0")
         if wifi_student_mode == "original_fc":
             return XFiWiFiOriginalFC(weight_path=weight_path, num_classes=cfg["model"]["num_classes"])
         if wifi_student_mode == "token_pool":
             return XFiWiFiStudent(weight_path=weight_path, num_classes=cfg["model"]["num_classes"])
         raise ValueError("model.wifi_student must be 'token_pool' or 'original_fc'")
 
+    if wifi_backbone != "xfi_resnet18":
+        raise ValueError("stage v1 distillation currently supports only model.wifi_backbone='xfi_resnet18'")
     teacher_checkpoint = cfg["video"].get("teacher_checkpoint")
     teacher_checkpoint_path = resolve_path(PROJECT_ROOT, teacher_checkpoint) if teacher_checkpoint else None
     return VideoWiFiCAFDModel(
@@ -694,6 +706,8 @@ def main():
         cfg.setdefault("train", {})["lr_head"] = args.lr_head
     if args.weight_decay is not None:
         cfg.setdefault("train", {})["weight_decay"] = args.weight_decay
+    if args.wifi_backbone is not None:
+        cfg.setdefault("model", {})["wifi_backbone"] = args.wifi_backbone
     if args.wifi_student is not None:
         cfg.setdefault("model", {})["wifi_student"] = args.wifi_student
     if args.scheduler_factor is not None:
@@ -755,6 +769,7 @@ def main():
     logger.info("saved_val_split=%s", run_dir / "splits" / "val.csv")
 
     model = build_model(cfg, args.stage)
+    logger.info("wifi_backbone=%s", cfg["model"].get("wifi_backbone", "xfi_resnet18"))
     logger.info("wifi_student_mode=%s", cfg["model"].get("wifi_student", "token_pool"))
     xfi_weight_info = get_loaded_xfi_weight_info(model)
     if xfi_weight_info["weight_path"]:
