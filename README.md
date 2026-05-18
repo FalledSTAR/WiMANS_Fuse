@@ -9,7 +9,7 @@ resources in git.
 
 - V0: run a stable 5 GHz single-user WiFi-only HAR baseline with X-Fi WiFi ResNet-18 initialization.
 - Video teacher: train a selectable WiMANS-style visual teacher before distillation.
-- V1: add frozen trained video teacher, Hybrid Projector, and CAFD feature relation distillation.
+- V1: add frozen trained video teacher, Hybrid Projector, CAFD feature relation distillation, and optional RSD diagnostics.
 - Keep the local laptop workflow focused on smoke tests and small runs.
 - Move the whole project, including `.git/`, to the 4080S machine for full training.
 
@@ -209,6 +209,27 @@ python train.py --config config\wimans_multi_bce.yaml --stage v0
   ```powershell
   python train.py --config config\wimans_multi_bce.yaml --stage v0 --bce-pos-weight 12
   ```
+
+  Multi-user V1 distillation keeps the same `[B, 54]` BCE activity head and the
+  same official WiMANS metric. The video branch supplies only feature-space
+  guidance; multi-user teacher logits are not used as a soft-label KD target.
+
+  CAFD feature-relation distillation:
+
+  ```powershell
+  python train.py --config config\wimans_multi_cafd.yaml --stage v1
+  ```
+
+  RSD feature redundancy-suppression distillation:
+
+  ```powershell
+  python train.py --config config\wimans_multi_rsd.yaml --stage v1
+  ```
+
+  Both configs use `../backbone_models/video/video_s3d.pt`,
+  `projector.target: video_feature`, `bce_pos_weight: 6.0`, and
+  `data.normalize: none`. If the 4080S run is close to memory limits, first try
+  `--batch-size 4`; if video decoding is the bottleneck, try `--num-frames 64`.
 
   To compact an existing detailed prediction file:
 

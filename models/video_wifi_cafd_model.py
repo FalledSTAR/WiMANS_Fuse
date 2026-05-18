@@ -48,6 +48,7 @@ class VideoWiFiCAFDModel(nn.Module):
         projector_dropout: float = 0.2,
         rsd_gamma: int = 2,
         wifi_student_mode: str = "token_pool",
+        return_teacher_logits: bool = True,
     ):
         super().__init__()
         if projector_target not in {"video_feature", "projected"}:
@@ -57,6 +58,7 @@ class VideoWiFiCAFDModel(nn.Module):
         self.projector_target = projector_target
         self.wifi_student_mode = wifi_student_mode
         self.use_projector_logits_requested = bool(use_projector_logits)
+        self.return_teacher_logits = bool(return_teacher_logits)
         if wifi_student_mode == "original_fc":
             self.wifi_student = XFiWiFiOriginalFC(weight_path=xfi_weight_path, num_classes=num_classes)
         else:
@@ -121,11 +123,12 @@ class VideoWiFiCAFDModel(nn.Module):
         for parameter in self.projector_classifier.parameters():
             parameter.requires_grad = False
         self.projector_classifier.eval()
-        self.teacher_logits_source = (
-            "projector_classifier"
-            if self._should_use_projector_logits()
-            else "s3d_classifier"
-        )
+        if self._should_use_projector_logits():
+            self.teacher_logits_source = "projector_classifier"
+        elif self.return_teacher_logits:
+            self.teacher_logits_source = "s3d_classifier"
+        else:
+            self.teacher_logits_source = "disabled"
 
     def _load_video_projector_checkpoint(self, checkpoint_path: str):
         payload = torch.load(checkpoint_path, map_location="cpu")
@@ -204,8 +207,13 @@ class VideoWiFiCAFDModel(nn.Module):
 
     def forward(self, wifi, video):
         wifi_out = self.wifi_student(wifi, return_features=True)
-        video_out = self.video_teacher(video, return_logits=True)
-        video_feature = video_out["feature"]
+        video_out = self.video_teacher(video, return_logits=self.return_teacher_logits)
+        if isinstance(video_out, dict):
+            video_feature = video_out["feature"]
+            s3d_logits = video_out.get("logits")
+        else:
+            video_feature = video_out
+            s3d_logits = None
         wifi_projected = self.wifi_projector(wifi_out["tokens"])
         wifi_rsd_feature = self.rsd_projector(wifi_out["feature"])
         if self.freeze_video_projector:
@@ -218,7 +226,7 @@ class VideoWiFiCAFDModel(nn.Module):
         else:
             teacher_distill_feature = video_projected
         projector_logits = None
-        teacher_logits = video_out["logits"]
+        teacher_logits = s3d_logits
         if self._should_use_projector_logits():
             with torch.no_grad():
                 projector_logits = self.projector_classifier(video_projected)
@@ -226,7 +234,7 @@ class VideoWiFiCAFDModel(nn.Module):
         return {
             "logits": wifi_out["logits"],
             "teacher_logits": teacher_logits,
-            "s3d_logits": video_out["logits"],
+            "s3d_logits": s3d_logits,
             "projector_logits": projector_logits,
             "teacher_logits_source": self.teacher_logits_source,
             "wifi_feature": wifi_out["feature"],

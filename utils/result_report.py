@@ -334,6 +334,7 @@ def build_wimans_result_payload(model_name, task, cfg, model_summary=None):
         "video": cfg.get("video", {}),
         "projector": cfg.get("projector", {}),
         "cafd": cfg.get("cafd", {}),
+        "rsd": cfg.get("rsd", {}),
         "complexity": (model_summary or {}).get("flops", {}),
         "evaluation_protocol": {
             "official_wimans_activity_accuracy": "reshape predictions and labels to [N*6, 9], apply sigmoid(logits) > threshold, then compute sklearn accuracy_score over exact 9-bit slot vectors",

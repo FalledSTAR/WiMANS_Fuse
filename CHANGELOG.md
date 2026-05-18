@@ -3,6 +3,33 @@
 All notable changes, problems, validation commands, and commit hashes should be
 recorded here before moving the project to the 4080S machine.
 
+## v0.1.23 - 2026-05-18
+
+- Implementation commit: `pending`
+- Changes:
+  - Added multi-user V1 CAFD config `config/wimans_multi_cafd.yaml`.
+  - Added multi-user V1 RSD config `config/wimans_multi_rsd.yaml`.
+  - Kept the model output and loss compatible with WiMANS multi-user activity evaluation: `[B,54]` logits with `BCEWithLogitsLoss`.
+  - Kept `accuracy.avg` in `result.json` mapped to the official comparable `official_slot_acc`.
+  - Added CLI overrides for `--cafd-temperature` and `--rsd-reduction`.
+  - Fixed `--lambda-cafd 0.0` / positive values so the CLI override also updates `cafd.enable`.
+  - Disabled misleading multi-user teacher-accuracy logging by default because the video teacher is used as a feature teacher, not a 54-output soft-label teacher.
+  - Added `video.return_teacher_logits: false` for the multi-user CAFD/RSD configs to avoid computing unused S3D classifier logits.
+  - Logged the loaded X-Fi WiFi ResNet-18 weight path and backbone type in new runs.
+- Problems found:
+  - WiFi-only multi-user BCE improved the official slot metric partly through empty-slot predictions, while active-slot accuracy remained low.
+  - The current single-person video teacher is useful as a frozen feature extractor, but its logits are not directly comparable to the 54-label multi-user BCE target.
+  - CAFD/RSD should therefore be tested as feature-space guidance first, before adding any extra logits KD.
+- Validation commands:
+  - `python -m compileall train.py models utils datasets losses scripts`
+  - `python train.py --config config\wimans_multi_cafd.yaml --stage v1 --sample-limit 10 --epochs 1 --batch-size 2 --num-frames 8 --scheduler-patience 1 --lambda-cafd 0.01`
+  - `python train.py --config config\wimans_multi_rsd.yaml --stage v1 --sample-limit 10 --epochs 1 --batch-size 2 --num-frames 8 --scheduler-patience 1 --lambda-rsd 1e-5`
+- Validation result:
+  - Static compile passed.
+  - CAFD smoke run completed and wrote CAFD component values to `metrics/train_batches.csv`.
+  - RSD smoke run completed and wrote RSD component values to `metrics/train_batches.csv`.
+  - `result.json` kept `accuracy.avg == official_slot_acc`.
+
 ## v0.1.22 - 2026-05-18
 
 - Implementation commit: `pending`
