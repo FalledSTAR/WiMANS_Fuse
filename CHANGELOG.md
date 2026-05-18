@@ -3,6 +3,26 @@
 All notable changes, problems, validation commands, and commit hashes should be
 recorded here before moving the project to the 4080S machine.
 
+## v0.1.21 - 2026-05-18
+
+- Implementation commit: `393c69b`
+- Changes:
+  - Added compact prediction export for readable prediction-vs-label inspection.
+  - Added `splits/val_predictions_best_compact.csv` with one row per sample, per-slot true label, prediction, OK/ERR result, and a concise `wrong_slots` summary.
+  - Added `scripts/simplify_predictions.py` to convert an existing detailed `val_predictions_best.csv` into a compact comparison CSV.
+  - Updated `config/wimans_multi_bce.yaml` so multi-user BCE runs no longer save detailed prediction CSV files for every epoch by default.
+- Problems found:
+  - Detailed multi-user BCE prediction CSV files contain per-class probabilities for all six slots, which is useful for debugging but difficult to inspect manually.
+  - Saving one detailed prediction CSV per epoch produced too many large files for 200-epoch experiments.
+- Validation commands:
+  - `python -m compileall train.py scripts utils`
+  - `python scripts\simplify_predictions.py --input output\wimans_classroom_24g_multi_bce\v0\20260518_103936\splits\val_predictions_best.csv`
+  - `python train.py --config config\wimans_multi_bce.yaml --stage v0 --sample-limit 24 --epochs 1 --batch-size 4 --scheduler-patience 1`
+- Validation result:
+  - Static compile passed.
+  - Existing run `20260518_103936` now has `splits/val_predictions_best_compact.csv`.
+  - Smoke run generated only best detailed and best compact prediction CSV files, with no per-epoch prediction CSV files.
+
 ## v0.1.20 - 2026-05-18
 
 - Implementation commit: `9a21326`
