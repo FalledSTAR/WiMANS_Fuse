@@ -191,6 +191,18 @@ for metrics.
 python train.py --config config\wimans_multi_bce.yaml --stage v0
 ```
 
+WiMANS-style CNN-1D WiFi-only comparison:
+
+```powershell
+python train.py --config config\wimans_multi_cnn1d.yaml --stage v0
+```
+
+This CNN-1D config follows the official WiMANS WiFi CSI baseline structure:
+`BatchNorm1d(270) -> Conv1d(128) -> Conv1d(256) -> Conv1d(512) -> mean pool
+-> Linear(54)`. It uses the same split logic, BCE loss, compact prediction
+export, and WiMANS-compatible `official_slot_acc` metrics as the X-Fi
+ResNet-18 multi-user baseline.
+
   The primary metric is `official_slot_acc`, matching the WiMANS-style exact
   9-way vector match per user slot after `sigmoid(logits) > threshold`. The run
   also saves `sample_exact_acc`, `active_slot_acc`, per-slot prediction columns,

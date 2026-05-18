@@ -3,6 +3,26 @@
 All notable changes, problems, validation commands, and commit hashes should be
 recorded here before moving the project to the 4080S machine.
 
+## v0.1.24 - 2026-05-18
+
+- Implementation commit: `pending`
+- Changes:
+  - Added WiMANS-style `CNN1DWiFi` model for standalone WiFi CSI experiments.
+  - Added `config/wimans_multi_cnn1d.yaml` for multi-user classroom 2.4 GHz WiFi-only BCE training.
+  - Added `model.wifi_backbone: cnn1d` support for `train.py --stage v0`.
+  - Added `--wifi-backbone` CLI override for quick X-Fi ResNet-18 vs CNN-1D checks.
+  - Documented the CNN-1D experiment command in `README.md`.
+- Problems found:
+  - Video-feature CAFD did not improve multi-user WiFi recognition, so a simpler WiFi-only architecture comparison is needed before adding more distillation modules.
+  - The CNN-1D test should clarify whether the X-Fi ResNet-18 student architecture is itself limiting the multi-user BCE setting.
+- Validation commands:
+  - `python -m compileall train.py models utils datasets losses scripts`
+  - `python train.py --config config\wimans_multi_cnn1d.yaml --stage v0 --sample-limit 24 --epochs 1 --batch-size 4 --scheduler-patience 1`
+- Validation result:
+  - Static compile passed.
+  - Tiny CNN-1D smoke run completed and generated config, model summary, split CSV files, metrics, compact predictions, result JSON, and best checkpoint.
+  - Smoke `result.json` kept `accuracy.avg == best_official_slot_acc`.
+
 ## v0.1.23 - 2026-05-18
 
 - Implementation commit: `137e33f`
