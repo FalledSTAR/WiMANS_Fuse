@@ -6,9 +6,39 @@ from pathlib import Path
 import yaml
 
 
-def create_run_dir(project_root: Path, output_dir: str, experiment_name: str, stage: str) -> Path:
+def _slug_join(values, default: str) -> str:
+    if not values:
+        return default
+    if not isinstance(values, (list, tuple)):
+        values = [values]
+    if len(values) != 1:
+        return "mixed"
+    return str(values[0]).strip().replace(" ", "_") or default
+
+
+def structured_output_dir(project_root: Path, output_dir: str, cfg=None) -> Path:
+    base_dir = project_root / output_dir
+    if cfg is None:
+        return base_dir
+
+    base_parts = {part.lower() for part in Path(output_dir).parts}
+    if "single" in base_parts or "multi" in base_parts:
+        return base_dir
+
+    data_cfg = cfg.get("data", {})
+    label_mode = str(data_cfg.get("label_mode", ""))
+    user_mode = str(data_cfg.get("user_mode", ""))
+    is_multi = user_mode == "multi" or label_mode.startswith("multi")
+    if not is_multi:
+        return base_dir / "single"
+
+    environment = _slug_join(data_cfg.get("environment"), "unknown_environment")
+    return base_dir / "multi" / environment
+
+
+def create_run_dir(project_root: Path, output_dir: str, experiment_name: str, stage: str, cfg=None) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_dir = project_root / output_dir / experiment_name / stage
+    base_dir = structured_output_dir(project_root, output_dir, cfg=cfg) / experiment_name / stage
     run_dir = base_dir / timestamp
     suffix = 1
     while run_dir.exists():

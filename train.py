@@ -808,6 +808,7 @@ def main():
         cfg["experiment"]["output_dir"],
         cfg["experiment"]["name"],
         args.stage,
+        cfg=cfg,
     )
     logger = setup_run_logger(run_dir / "train.log")
     logger.info("run_dir=%s", run_dir)
