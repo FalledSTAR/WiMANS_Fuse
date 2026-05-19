@@ -3,6 +3,28 @@
 All notable changes, problems, validation commands, and commit hashes should be
 recorded here before moving the project to the 4080S machine.
 
+## v0.1.25 - 2026-05-19
+
+- Implementation commit: `a903dd2`
+- Changes:
+  - Added `multi_slot_ce` label mode for multi-user activity recognition.
+  - Encoded each user slot as a 10-class label: `empty_slot + 9 activities`.
+  - Added slot-wise CrossEntropy loss over logits reshaped to `[B, 6, 10]`.
+  - Added WiMANS-compatible evaluation by mapping slot-CE predictions back to 9-bit activity vectors.
+  - Added `config/wimans_multi_cnn1d_slot_ce.yaml` for CNN-1D slot-wise CE experiments.
+  - Kept `official_slot_acc`, `active_slot_acc`, and `sample_exact_acc` in epoch metrics and `result.json`.
+  - Reused compact prediction CSV export for readable slot-level true/pred comparisons.
+- Problems found:
+  - CNN-1D with BCE improved empty-slot accuracy but still underpredicted active slots.
+  - The BCE independent-sigmoid formulation is a likely bottleneck because each slot is naturally a single-label `empty/activity` decision.
+- Validation commands:
+  - `python -m compileall train.py models utils datasets losses scripts`
+  - `python train.py --config config\wimans_multi_cnn1d_slot_ce.yaml --stage v0 --sample-limit 24 --epochs 1 --batch-size 4 --scheduler-patience 1`
+- Validation result:
+  - Static compile passed.
+  - Tiny slot-CE smoke run completed and generated config, model summary, split CSV files, metrics, compact predictions, result JSON, and best checkpoint.
+  - Smoke `result.json` kept `accuracy.avg == best_official_slot_acc` and recorded the 10-class slot argmax protocol.
+
 ## v0.1.24 - 2026-05-18
 
 - Implementation commit: `ff7965c`

@@ -22,6 +22,7 @@ from utils import (  # noqa: E402
     compact_prediction_rows,
     create_run_dir,
     load_config,
+    multi_slot_ce_prediction,
     resolve_path,
     save_checkpoint,
     save_yaml,
@@ -88,6 +89,21 @@ def _activity_vector_to_text(vector) -> str:
     return "|".join(active)
 
 
+def _slot_class_to_text(class_id: int) -> str:
+    class_id = int(class_id)
+    if class_id == 0:
+        return "empty_slot"
+    return ID_TO_ACTIVITY[class_id - 1]
+
+
+def _slot_class_to_activity_vector(class_id: int):
+    vector = [0] * 9
+    class_id = int(class_id)
+    if class_id > 0:
+        vector[class_id - 1] = 1
+    return vector
+
+
 def build_loaders(cfg, use_video: bool):
     data_root = resolve_path(PROJECT_ROOT, cfg["data"]["root"])
     annotation = resolve_path(PROJECT_ROOT, cfg["data"]["annotation"])
@@ -102,7 +118,7 @@ def build_loaders(cfg, use_video: bool):
     if label_mode == "single_ce":
         labels = dataframe.apply(build_single_user_label, axis=1)
         stratify_labels = labels if labels.value_counts().min() >= 2 and len(labels.unique()) <= int(len(dataframe) * float(cfg["data"]["test_size"])) else None
-    elif label_mode == "multi_bce":
+    elif label_mode in {"multi_bce", "multi_slot_ce"}:
         stratify_labels = None
     else:
         raise ValueError(f"Unsupported data.label_mode: {label_mode}")
@@ -363,7 +379,7 @@ def safe_teacher_accuracy(teacher_logits: torch.Tensor, labels: torch.Tensor, la
         if labels.ndim == 1 and teacher_logits.ndim == 2 and teacher_logits.shape[0] == labels.shape[0]:
             return accuracy_for_mode(teacher_logits.detach(), labels.detach(), label_mode, threshold=threshold)
         return None
-    if label_mode == "multi_bce":
+    if label_mode in {"multi_bce", "multi_slot_ce"}:
         target_dim = int(labels.reshape(labels.shape[0], -1).shape[-1])
         if teacher_logits.ndim == 2 and teacher_logits.shape[-1] == target_dim:
             return accuracy_for_mode(teacher_logits.detach(), labels.detach(), label_mode, threshold=threshold)
@@ -638,6 +654,52 @@ def collect_predictions(model, loader, device, stage, cfg):
                 rows.append(row)
             continue
 
+        if label_mode == "multi_slot_ce":
+            probs = torch.softmax(logits.reshape(batch_size, 6, 10), dim=-1)
+            pred_classes = probs.argmax(dim=-1).long()
+            true_classes = labels.reshape(batch_size, 6).long()
+            slot_correct = pred_classes.eq(true_classes)
+            active_slots = true_classes > 0
+            exact_sample = slot_correct.all(dim=-1)
+            for item_idx, sample_id in enumerate(sample_ids):
+                item_true = true_classes[item_idx].detach().cpu()
+                item_pred = pred_classes[item_idx].detach().cpu()
+                item_probs = probs[item_idx].detach().cpu()
+                item_slot_correct = slot_correct[item_idx].detach().cpu()
+                item_active = active_slots[item_idx].detach().cpu()
+                active_total = int(item_active.long().sum().item())
+                active_correct = int((item_slot_correct & item_active).long().sum().item())
+                row = {
+                    "sample_id": sample_id,
+                    "task_mode": "multi_slot_ce",
+                    "loss": float(loss.item()),
+                    "slot_correct_count": int(item_slot_correct.long().sum().item()),
+                    "slot_total": 6,
+                    "official_slot_accuracy": float(item_slot_correct.float().mean().item()),
+                    "active_slot_correct_count": active_correct,
+                    "active_slot_total": active_total,
+                    "active_slot_accuracy": "" if active_total == 0 else float(active_correct / active_total),
+                    "exact_sample_correct": int(bool(exact_sample[item_idx].item())),
+                }
+                for slot_idx in range(6):
+                    true_id = int(item_true[slot_idx].item())
+                    pred_id = int(item_pred[slot_idx].item())
+                    true_vec = _slot_class_to_activity_vector(true_id)
+                    pred_vec = _slot_class_to_activity_vector(pred_id)
+                    row[f"slot_{slot_idx + 1}_true_id"] = true_id
+                    row[f"slot_{slot_idx + 1}_pred_id"] = pred_id
+                    row[f"slot_{slot_idx + 1}_true_activity"] = _slot_class_to_text(true_id)
+                    row[f"slot_{slot_idx + 1}_pred_activity"] = _slot_class_to_text(pred_id)
+                    row[f"slot_{slot_idx + 1}_correct"] = int(bool(item_slot_correct[slot_idx].item()))
+                    row[f"slot_{slot_idx + 1}_active"] = int(bool(item_active[slot_idx].item()))
+                    row[f"prob_s{slot_idx + 1}_empty_slot"] = float(item_probs[slot_idx, 0].item())
+                    for class_id, class_name in ID_TO_ACTIVITY.items():
+                        row[f"true_s{slot_idx + 1}_c{class_id}"] = int(true_vec[class_id])
+                        row[f"pred_s{slot_idx + 1}_c{class_id}"] = int(pred_vec[class_id])
+                        row[f"prob_s{slot_idx + 1}_{class_name}"] = float(item_probs[slot_idx, class_id + 1].item())
+                rows.append(row)
+            continue
+
         probs = torch.softmax(logits, dim=-1)
         pred_ids = probs.argmax(dim=-1)
         correct = pred_ids.eq(labels.long())
@@ -811,12 +873,14 @@ def main():
     label_mode = get_label_mode(cfg)
     if label_mode == "multi_bce" and int(cfg["model"]["num_classes"]) != 54:
         raise ValueError("data.label_mode='multi_bce' requires model.num_classes=54 for 6 user slots x 9 activities")
+    if label_mode == "multi_slot_ce" and int(cfg["model"]["num_classes"]) != 60:
+        raise ValueError("data.label_mode='multi_slot_ce' requires model.num_classes=60 for 6 user slots x 10 classes")
     logger.info("label_mode=%s threshold=%.4f", label_mode, get_threshold(cfg))
     class_names = [ID_TO_ACTIVITY[class_id] for class_id in sorted(ID_TO_ACTIVITY)]
     cafd_cfg = get_cafd_cfg(cfg)
     rsd_cfg = get_rsd_cfg(cfg)
     if args.stage == "v0":
-        model_name = f"xfi_resnet18_{cfg['model'].get('wifi_student', 'token_pool')}"
+        model_name = f"{cfg['model'].get('wifi_backbone', 'xfi_resnet18')}_{cfg['model'].get('wifi_student', 'token_pool')}"
     else:
         model_parts = [f"xfi_resnet18_{cfg['model'].get('wifi_student', 'token_pool')}", "s3d"]
         if cafd_cfg["enabled"]:
@@ -826,7 +890,7 @@ def main():
         model_name = "_with_".join(model_parts)
     result_payload = build_wimans_result_payload(
         model_name=model_name,
-        task=f"{args.stage}_{'multi_user_activity' if label_mode == 'multi_bce' else 'single_person_har'}",
+        task=f"{args.stage}_{'multi_user_activity' if label_mode in {'multi_bce', 'multi_slot_ce'} else 'single_person_har'}",
         cfg=cfg,
         model_summary=model_summary,
     )

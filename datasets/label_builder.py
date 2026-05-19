@@ -37,3 +37,19 @@ def build_multi_user_activity_label(row) -> np.ndarray:
         label[slot_idx, ACTIVITY_TO_ID[activity]] = 1.0
 
     return label
+
+
+def build_multi_user_slot_label(row) -> np.ndarray:
+    """Encode each user slot as one of 10 classes: empty + 9 activities."""
+    label = np.zeros((6,), dtype=np.int64)
+    for slot_idx, col in enumerate(ACTIVITY_COLS):
+        value = row[col]
+        if not _is_present_activity(value):
+            continue
+
+        activity = str(value)
+        if activity not in ACTIVITY_TO_ID:
+            raise KeyError(f"Unknown activity label: {activity}")
+        label[slot_idx] = ACTIVITY_TO_ID[activity] + 1
+
+    return label
