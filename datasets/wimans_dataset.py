@@ -5,7 +5,7 @@ import pandas as pd
 from torch.utils.data import Dataset
 
 from .constants import ACTIVITY_COLS
-from .label_builder import build_multi_user_activity_label, build_single_user_label
+from .label_builder import build_multi_user_activity_label, build_multi_user_slot_label, build_single_user_label
 from .video_loader import OnlineS3DVideoLoader
 from .wifi_amp_loader import load_wifi_amplitude
 
@@ -110,6 +110,8 @@ class WiMANSHARDataset(Dataset):
             item["label"] = build_single_user_label(row)
         elif self.label_mode == "multi_bce":
             item["label"] = build_multi_user_activity_label(row)
+        elif self.label_mode == "multi_slot_ce":
+            item["label"] = build_multi_user_slot_label(row)
         else:
             raise ValueError(f"Unsupported label_mode: {self.label_mode}")
 

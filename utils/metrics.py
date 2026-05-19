@@ -64,9 +64,36 @@ def slot_argmax_sample_exact_accuracy(logits: torch.Tensor, labels: torch.Tensor
     return predictions.eq(labels_view).all(dim=-1).all(dim=-1).float().mean().item()
 
 
+def multi_slot_ce_prediction(logits: torch.Tensor) -> torch.Tensor:
+    return logits.reshape(logits.shape[0], 6, 10).argmax(dim=-1)
+
+
+def multi_slot_ce_official_accuracy(logits: torch.Tensor, labels: torch.Tensor) -> float:
+    predictions = multi_slot_ce_prediction(logits)
+    labels_view = labels.reshape(labels.shape[0], 6).long()
+    return predictions.eq(labels_view).float().mean().item()
+
+
+def multi_slot_ce_active_accuracy(logits: torch.Tensor, labels: torch.Tensor) -> float:
+    predictions = multi_slot_ce_prediction(logits)
+    labels_view = labels.reshape(labels.shape[0], 6).long()
+    active = labels_view > 0
+    if not bool(active.any()):
+        return 0.0
+    return predictions.eq(labels_view)[active].float().mean().item()
+
+
+def multi_slot_ce_sample_exact_accuracy(logits: torch.Tensor, labels: torch.Tensor) -> float:
+    predictions = multi_slot_ce_prediction(logits)
+    labels_view = labels.reshape(labels.shape[0], 6).long()
+    return predictions.eq(labels_view).all(dim=-1).float().mean().item()
+
+
 def accuracy_for_mode(logits: torch.Tensor, labels: torch.Tensor, label_mode: str, threshold: float = 0.5) -> float:
     if label_mode == "single_ce":
         return accuracy_top1(logits, labels)
     if label_mode == "multi_bce":
         return official_slot_accuracy(logits, labels, threshold=threshold)
+    if label_mode == "multi_slot_ce":
+        return multi_slot_ce_official_accuracy(logits, labels)
     raise ValueError(f"Unsupported label_mode: {label_mode}")

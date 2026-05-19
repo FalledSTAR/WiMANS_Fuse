@@ -251,6 +251,59 @@ def summarize_multi_bce_prediction_rows(prediction_rows, class_names, split_df=N
     }
 
 
+def _multi_slot_ce_arrays(rows, num_slots=6):
+    y_true = []
+    y_pred = []
+    for row in rows:
+        for slot_idx in range(num_slots):
+            y_true.append(int(row.get(f"slot_{slot_idx + 1}_true_id", 0)))
+            y_pred.append(int(row.get(f"slot_{slot_idx + 1}_pred_id", 0)))
+    return y_true, y_pred
+
+
+def summarize_multi_slot_ce_prediction_rows(prediction_rows, class_names, split_df=None):
+    rows = attach_split_metadata(prediction_rows, split_df)
+    if not rows:
+        return {
+            "accuracy": 0.0,
+            "official_slot_acc": 0.0,
+            "sample_exact_acc": 0.0,
+            "active_slot_acc": 0.0,
+            "classification_report": {},
+            "class_accuracy": {},
+            "environment_accuracy": {},
+            "num_samples": 0,
+        }
+
+    slot_correct = sum(int(row.get("slot_correct_count", 0)) for row in rows)
+    slot_total = sum(int(row.get("slot_total", 0)) for row in rows)
+    active_correct = sum(int(row.get("active_slot_correct_count", 0)) for row in rows)
+    active_total = sum(int(row.get("active_slot_total", 0)) for row in rows)
+    sample_exact = sum(int(row.get("exact_sample_correct", 0)) for row in rows)
+    y_true, y_pred = _multi_slot_ce_arrays(rows)
+    slot_class_names = ["empty_slot", *class_names]
+    report = classification_report(
+        y_true,
+        y_pred,
+        labels=list(range(len(slot_class_names))),
+        target_names=slot_class_names,
+        digits=6,
+        zero_division=0,
+        output_dict=True,
+    )
+    official_slot_acc = float(slot_correct / slot_total) if slot_total else 0.0
+    return {
+        "accuracy": official_slot_acc,
+        "official_slot_acc": official_slot_acc,
+        "sample_exact_acc": float(sample_exact / len(rows)) if rows else 0.0,
+        "active_slot_acc": float(active_correct / active_total) if active_total else 0.0,
+        "classification_report": report,
+        "class_accuracy": _multi_class_accuracy(rows),
+        "environment_accuracy": _multi_environment_accuracy(rows),
+        "num_samples": len(rows),
+    }
+
+
 def summarize_prediction_rows(prediction_rows, class_names, split_df=None):
     rows = attach_split_metadata(prediction_rows, split_df)
     if not rows:
@@ -264,6 +317,8 @@ def summarize_prediction_rows(prediction_rows, class_names, split_df=None):
 
     if str(rows[0].get("task_mode", "")) == "multi_bce":
         return summarize_multi_bce_prediction_rows(rows, class_names, split_df=None)
+    if str(rows[0].get("task_mode", "")) == "multi_slot_ce":
+        return summarize_multi_slot_ce_prediction_rows(rows, class_names, split_df=None)
 
     labels = list(range(len(class_names)))
     y_true, y_pred = _labels_from_rows(rows)
@@ -326,6 +381,11 @@ def best_epoch_result(epoch_results):
 
 
 def build_wimans_result_payload(model_name, task, cfg, model_summary=None):
+    label_mode = str(cfg.get("data", {}).get("label_mode", "single_ce"))
+    if label_mode == "multi_slot_ce":
+        official_protocol = "reshape logits to [N,6,10], argmax each slot over empty_slot + 9 activities, map empty_slot to all-zero 9-bit vectors, then compute exact slot-vector accuracy"
+    else:
+        official_protocol = "reshape predictions and labels to [N*6, 9], apply sigmoid(logits) > threshold, then compute sklearn accuracy_score over exact 9-bit slot vectors"
     return {
         "model": model_name,
         "task": task,
@@ -337,7 +397,7 @@ def build_wimans_result_payload(model_name, task, cfg, model_summary=None):
         "rsd": cfg.get("rsd", {}),
         "complexity": (model_summary or {}).get("flops", {}),
         "evaluation_protocol": {
-            "official_wimans_activity_accuracy": "reshape predictions and labels to [N*6, 9], apply sigmoid(logits) > threshold, then compute sklearn accuracy_score over exact 9-bit slot vectors",
+            "official_wimans_activity_accuracy": official_protocol,
             "accuracy_avg_matches": "official_slot_acc",
             "auxiliary_metrics": [
                 "active_slot_acc",

@@ -77,6 +77,6 @@ def _compact_single_ce_rows(rows):
 def compact_prediction_rows(rows):
     if not rows:
         return []
-    if rows[0].get("task_mode") == "multi_bce":
+    if rows[0].get("task_mode") in {"multi_bce", "multi_slot_ce"}:
         return _compact_multi_bce_rows(rows)
     return _compact_single_ce_rows(rows)

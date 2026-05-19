@@ -203,8 +203,23 @@ This CNN-1D config follows the official WiMANS WiFi CSI baseline structure:
 export, and WiMANS-compatible `official_slot_acc` metrics as the X-Fi
 ResNet-18 multi-user baseline.
 
+Slot-wise CrossEntropy comparison:
+
+```powershell
+python train.py --config config\wimans_multi_cnn1d_slot_ce.yaml --stage v0
+```
+
+This config treats each user slot as a 10-class single-label problem:
+`empty_slot + 9 activities`. The model outputs `[B, 60]`, reshaped to
+`[B, 6, 10]`. For comparison with WiMANS, predictions are mapped back to the
+same 9-bit activity slot vectors before computing `official_slot_acc`.
+Always inspect `active_slot_acc` and `sample_exact_acc` together with
+`official_slot_acc`, because the official metric includes empty slots.
+
   The primary metric is `official_slot_acc`, matching the WiMANS-style exact
-  9-way vector match per user slot after `sigmoid(logits) > threshold`. The run
+  9-way vector match per user slot. For `multi_bce`, predictions come from
+  `sigmoid(logits) > threshold`; for `multi_slot_ce`, the 10-class slot argmax
+  is mapped back to empty/all-zero or one-hot activity vectors. The run
   also saves `sample_exact_acc`, `active_slot_acc`, per-slot prediction columns,
   and per-activity slot accuracy in `result.json`. For readability, this config
   does not save detailed prediction CSV files for every epoch. It saves the best
