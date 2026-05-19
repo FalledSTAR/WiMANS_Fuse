@@ -2,7 +2,13 @@ import torch
 import torch.nn.functional as F
 
 
-def classification_loss(logits: torch.Tensor, labels: torch.Tensor, label_mode: str, pos_weight=None) -> torch.Tensor:
+def classification_loss(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    label_mode: str,
+    pos_weight=None,
+    slot_class_weights=None,
+) -> torch.Tensor:
     if label_mode == "single_ce":
         return F.cross_entropy(logits, labels.long())
 
@@ -17,6 +23,11 @@ def classification_loss(logits: torch.Tensor, labels: torch.Tensor, label_mode: 
         return F.binary_cross_entropy_with_logits(logits, target, pos_weight=weight)
 
     if label_mode == "multi_slot_ce":
-        return F.cross_entropy(logits.reshape(labels.shape[0] * 6, 10), labels.reshape(-1).long())
+        weight = None
+        if slot_class_weights is not None:
+            weight = torch.as_tensor(slot_class_weights, device=logits.device, dtype=logits.dtype)
+            if weight.numel() != 10:
+                raise ValueError(f"multi_slot_ce expects 10 class weights, got {weight.numel()}")
+        return F.cross_entropy(logits.reshape(labels.shape[0] * 6, 10), labels.reshape(-1).long(), weight=weight)
 
     raise ValueError(f"Unsupported label_mode: {label_mode}")

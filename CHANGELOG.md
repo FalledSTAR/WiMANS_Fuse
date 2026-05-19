@@ -3,6 +3,30 @@
 All notable changes, problems, validation commands, and commit hashes should be
 recorded here before moving the project to the 4080S machine.
 
+## v0.1.27 - 2026-05-19
+
+- Implementation commit: `pending`
+- Changes:
+  - Added weighted slot-wise CrossEntropy support for `multi_slot_ce`.
+  - Added `loss.slot_ce_class_weights` and the shorthand `loss.slot_ce_empty_weight` / `loss.slot_ce_activity_weight`.
+  - Added CLI overrides `--slot-ce-empty-weight` and `--slot-ce-activity-weight`.
+  - Added 5 GHz X-Fi ResNet-18 slot-CE configs:
+    - `config/wimans_multi_xfi_slot_ce_5g.yaml`
+    - `config/wimans_multi_xfi_slot_ce_5g_weighted.yaml`
+- Problems found:
+  - The repeated X-Fi slot-CE run `20260519_211629` exactly matched `20260519_102234`, including split-file MD5 hashes and best metrics.
+  - Current slot-CE baseline predicts active slot count well, but active activity classes remain confused.
+- Validation commands:
+  - `python -m compileall train.py losses config utils datasets models scripts`
+  - Weighted slot-CE smoke run with `--sample-limit 24 --epochs 1 --batch-size 4`.
+- Validation result:
+  - Static compile passed.
+  - Weighted `multi_slot_ce` loss forward/backward check passed with finite gradients.
+  - Tiny weighted X-Fi slot-CE smoke run completed:
+    - `run_dir=output/multi/classroom/wimans_classroom_5g_multi_xfi_slot_ce_weighted_empty03/v0/20260519_224322`
+    - `slot_ce_class_weights=[0.3, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]`
+    - `epoch=1 train_loss=1.518262 train_acc=0.692982 val_loss=1.201196 val_acc=0.833333`
+
 ## v0.1.26 - 2026-05-19
 
 - Implementation commit: `c42d71f`

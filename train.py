@@ -43,6 +43,8 @@ def parse_args():
     parser.add_argument("--normalize", choices=["none", "zscore", "log1p_zscore"], default=None)
     parser.add_argument("--threshold", type=float, default=None)
     parser.add_argument("--bce-pos-weight", type=float, default=None)
+    parser.add_argument("--slot-ce-empty-weight", type=float, default=None)
+    parser.add_argument("--slot-ce-activity-weight", type=float, default=None)
     parser.add_argument("--lr-backbone", type=float, default=None)
     parser.add_argument("--lr-head", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
@@ -80,6 +82,29 @@ def get_threshold(cfg) -> float:
 
 def get_bce_pos_weight(cfg):
     return cfg.get("train", {}).get("bce_pos_weight", None)
+
+
+def get_slot_ce_class_weights(cfg):
+    loss_cfg = cfg.get("loss", {})
+    weights = loss_cfg.get("slot_ce_class_weights")
+    if weights is None:
+        empty_weight = loss_cfg.get("slot_ce_empty_weight")
+        activity_weight = loss_cfg.get("slot_ce_activity_weight", 1.0)
+        if empty_weight is None:
+            return None
+        return [float(empty_weight), *[float(activity_weight)] * 9]
+
+    if isinstance(weights, dict):
+        empty_weight = float(weights.get("empty_slot", weights.get("empty", 1.0)))
+        activity_default = float(weights.get("activity", 1.0))
+        return [
+            empty_weight,
+            *[float(weights.get(ID_TO_ACTIVITY[idx], activity_default)) for idx in range(9)],
+        ]
+
+    if len(weights) != 10:
+        raise ValueError(f"loss.slot_ce_class_weights must contain 10 values, got {len(weights)}")
+    return [float(value) for value in weights]
 
 
 def _activity_vector_to_text(vector) -> str:
@@ -399,6 +424,7 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
     label_mode = get_label_mode(cfg)
     threshold = get_threshold(cfg)
     bce_pos_weight = get_bce_pos_weight(cfg)
+    slot_class_weights = get_slot_ce_class_weights(cfg)
     lambda_rsd_effective = effective_rsd_lambda(rsd_cfg, epoch)
     samples_seen = 0
     for batch_idx, batch in enumerate(loader, start=1):
@@ -410,7 +436,13 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
 
         if stage == "v0":
             logits = model(wifi)
-            loss = classification_loss(logits, labels, label_mode, pos_weight=bce_pos_weight)
+            loss = classification_loss(
+                logits,
+                labels,
+                label_mode,
+                pos_weight=bce_pos_weight,
+                slot_class_weights=slot_class_weights,
+            )
             cls_loss_value = float(loss.item())
             cafd_loss_value = None
             cafd_weighted_mse_value = None
@@ -430,7 +462,13 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             video = batch["video"].float().to(device)
             outputs = model(wifi, video)
             logits = outputs["logits"]
-            cls_loss = classification_loss(logits, labels, label_mode, pos_weight=bce_pos_weight)
+            cls_loss = classification_loss(
+                logits,
+                labels,
+                label_mode,
+                pos_weight=bce_pos_weight,
+                slot_class_weights=slot_class_weights,
+            )
             loss = cls_loss
             cafd_loss = None
             cafd_details = None
@@ -563,6 +601,7 @@ def evaluate(model, loader, device, stage, cfg):
     label_mode = get_label_mode(cfg)
     threshold = get_threshold(cfg)
     bce_pos_weight = get_bce_pos_weight(cfg)
+    slot_class_weights = get_slot_ce_class_weights(cfg)
     for batch in loader:
         wifi = batch["wifi"].float().to(device)
         labels = batch["label"].to(device)
@@ -572,7 +611,13 @@ def evaluate(model, loader, device, stage, cfg):
         else:
             video = batch["video"].float().to(device)
             logits = model(wifi, video)["logits"]
-        loss = classification_loss(logits, labels, label_mode, pos_weight=bce_pos_weight)
+        loss = classification_loss(
+            logits,
+            labels,
+            label_mode,
+            pos_weight=bce_pos_weight,
+            slot_class_weights=slot_class_weights,
+        )
         total_loss += float(loss.item()) * batch_size
         total_correct += accuracy_for_mode(logits, labels, label_mode, threshold=threshold) * batch_size
         total_samples += batch_size
@@ -589,6 +634,7 @@ def collect_predictions(model, loader, device, stage, cfg):
     label_mode = get_label_mode(cfg)
     threshold = get_threshold(cfg)
     bce_pos_weight = get_bce_pos_weight(cfg)
+    slot_class_weights = get_slot_ce_class_weights(cfg)
     for batch in loader:
         wifi = batch["wifi"].float().to(device)
         labels = batch["label"].to(device)
@@ -602,7 +648,13 @@ def collect_predictions(model, loader, device, stage, cfg):
             logits = outputs["logits"]
             teacher_logits = outputs.get("teacher_logits")
 
-        loss = classification_loss(logits, labels, label_mode, pos_weight=bce_pos_weight)
+        loss = classification_loss(
+            logits,
+            labels,
+            label_mode,
+            pos_weight=bce_pos_weight,
+            slot_class_weights=slot_class_weights,
+        )
         batch_metric = accuracy_for_mode(logits, labels, label_mode, threshold=threshold)
         total_loss += float(loss.item()) * batch_size
         total_metric_weighted += batch_metric * batch_size
@@ -762,6 +814,10 @@ def main():
         cfg.setdefault("test", {})["threshold"] = args.threshold
     if args.bce_pos_weight is not None:
         cfg.setdefault("train", {})["bce_pos_weight"] = args.bce_pos_weight
+    if args.slot_ce_empty_weight is not None:
+        cfg.setdefault("loss", {})["slot_ce_empty_weight"] = args.slot_ce_empty_weight
+    if args.slot_ce_activity_weight is not None:
+        cfg.setdefault("loss", {})["slot_ce_activity_weight"] = args.slot_ce_activity_weight
     if args.lr_backbone is not None:
         cfg.setdefault("train", {})["lr_backbone"] = args.lr_backbone
     if args.lr_head is not None:
@@ -877,6 +933,7 @@ def main():
     if label_mode == "multi_slot_ce" and int(cfg["model"]["num_classes"]) != 60:
         raise ValueError("data.label_mode='multi_slot_ce' requires model.num_classes=60 for 6 user slots x 10 classes")
     logger.info("label_mode=%s threshold=%.4f", label_mode, get_threshold(cfg))
+    logger.info("slot_ce_class_weights=%s", get_slot_ce_class_weights(cfg))
     class_names = [ID_TO_ACTIVITY[class_id] for class_id in sorted(ID_TO_ACTIVITY)]
     cafd_cfg = get_cafd_cfg(cfg)
     rsd_cfg = get_rsd_cfg(cfg)
