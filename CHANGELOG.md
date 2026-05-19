@@ -5,7 +5,7 @@ recorded here before moving the project to the 4080S machine.
 
 ## v0.1.25 - 2026-05-19
 
-- Implementation commit: `pending`
+- Implementation commit: `a903dd2`
 - Changes:
   - Added `multi_slot_ce` label mode for multi-user activity recognition.
   - Encoded each user slot as a 10-class label: `empty_slot + 9 activities`.
