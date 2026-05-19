@@ -5,7 +5,7 @@ recorded here before moving the project to the 4080S machine.
 
 ## v0.1.27 - 2026-05-19
 
-- Implementation commit: `pending`
+- Implementation commit: `8523847`
 - Changes:
   - Added weighted slot-wise CrossEntropy support for `multi_slot_ce`.
   - Added `loss.slot_ce_class_weights` and the shorthand `loss.slot_ce_empty_weight` / `loss.slot_ce_activity_weight`.
