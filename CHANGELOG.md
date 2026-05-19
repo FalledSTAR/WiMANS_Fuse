@@ -3,6 +3,27 @@
 All notable changes, problems, validation commands, and commit hashes should be
 recorded here before moving the project to the 4080S machine.
 
+## v0.1.26 - 2026-05-19
+
+- Implementation commit: `pending`
+- Changes:
+  - Added structured output directory routing for future runs.
+  - `train.py` now writes single-person runs under `output/single/<experiment>/<stage>/<timestamp>`.
+  - Multi-user runs now write under `output/multi/<environment>/<experiment>/<stage>/<timestamp>`.
+  - `train_video_teacher.py` now uses the same routing, so video-teacher runs stay separated under `output/single/<teacher_experiment>/video_teacher/<timestamp>`.
+  - Cleaned historical output layout for the latest 5 GHz multi-user runs and corrected saved `experiment.name` metadata for the moved 5 GHz runs.
+- Problems found:
+  - Some copied 5 GHz multi-user runs were still under `24g` experiment folder names.
+  - Two 5 GHz multi-user runs were missing the `v0` stage folder after manual output reorganization.
+- Validation commands:
+  - `python -m compileall train.py train_video_teacher.py utils`
+  - `python -c "from pathlib import Path; from utils.run_logging import structured_output_dir; ..."`
+  - Local output audit over `output/**/config.yaml`.
+- Validation result:
+  - Static compile passed.
+  - `structured_output_dir` returned `output/multi/classroom` for classroom multi-user configs and `output/single` for single-user configs.
+  - Output audit found 42 saved runs and all passed after the directory cleanup.
+
 ## v0.1.25 - 2026-05-19
 
 - Implementation commit: `a903dd2`

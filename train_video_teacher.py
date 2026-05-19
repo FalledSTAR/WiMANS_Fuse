@@ -430,7 +430,7 @@ def main():
     seed_everything(int(cfg["experiment"]["seed"]))
     device = select_device(cfg["train"]["device"])
 
-    run_dir = create_run_dir(PROJECT_ROOT, cfg["experiment"]["output_dir"], cfg["experiment"]["name"], "video_teacher")
+    run_dir = create_run_dir(PROJECT_ROOT, cfg["experiment"]["output_dir"], cfg["experiment"]["name"], "video_teacher", cfg=cfg)
     logger = setup_run_logger(run_dir / "train.log")
     logger.info("run_dir=%s", run_dir)
     logger.info("device=%s", device)
