@@ -5,7 +5,7 @@ recorded here before moving the project to the 4080S machine.
 
 ## v0.1.26 - 2026-05-19
 
-- Implementation commit: `pending`
+- Implementation commit: `c42d71f`
 - Changes:
   - Added structured output directory routing for future runs.
   - `train.py` now writes single-person runs under `output/single/<experiment>/<stage>/<timestamp>`.
