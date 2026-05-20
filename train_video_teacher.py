@@ -20,10 +20,11 @@ from models.video_teacher import (  # noqa: E402
     normalize_video_backbone_name,
 )
 from utils import (  # noqa: E402
-    accuracy_top1,
+    accuracy_for_mode,
     append_csv_rows,
     build_epoch_result,
     build_wimans_result_payload,
+    compact_prediction_rows,
     count_parameters,
     create_run_dir,
     load_config,
@@ -62,6 +63,63 @@ def select_device(name: str):
     if name == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(name)
+
+
+def get_label_mode(cfg) -> str:
+    return str(cfg.get("data", {}).get("label_mode", "single_ce"))
+
+
+def get_threshold(cfg) -> float:
+    return float(cfg.get("test", {}).get("threshold", 0.5))
+
+
+def get_bce_pos_weight(cfg):
+    return cfg.get("train", {}).get("bce_pos_weight", None)
+
+
+def get_slot_ce_class_weights(cfg):
+    loss_cfg = cfg.get("loss", {})
+    weights = loss_cfg.get("slot_ce_class_weights")
+    if weights is None:
+        empty_weight = loss_cfg.get("slot_ce_empty_weight")
+        activity_weight = loss_cfg.get("slot_ce_activity_weight", 1.0)
+        if empty_weight is None:
+            return None
+        return [float(empty_weight), *[float(activity_weight)] * 9]
+
+    if isinstance(weights, dict):
+        empty_weight = float(weights.get("empty_slot", weights.get("empty", 1.0)))
+        activity_default = float(weights.get("activity", 1.0))
+        return [
+            empty_weight,
+            *[float(weights.get(ID_TO_ACTIVITY[idx], activity_default)) for idx in range(9)],
+        ]
+
+    if len(weights) != 10:
+        raise ValueError(f"loss.slot_ce_class_weights must contain 10 values, got {len(weights)}")
+    return [float(value) for value in weights]
+
+
+def _activity_vector_to_text(vector) -> str:
+    active = [ID_TO_ACTIVITY[idx] for idx, value in enumerate(vector) if int(value) == 1]
+    if not active:
+        return "empty_slot"
+    return "|".join(active)
+
+
+def _slot_class_to_text(class_id: int) -> str:
+    class_id = int(class_id)
+    if class_id == 0:
+        return "empty_slot"
+    return ID_TO_ACTIVITY[class_id - 1]
+
+
+def _slot_class_to_activity_vector(class_id: int):
+    vector = [0] * 9
+    class_id = int(class_id)
+    if class_id > 0:
+        vector[class_id - 1] = 1
+    return vector
 
 
 def apply_overrides(cfg, args):
@@ -107,8 +165,18 @@ def build_loaders(cfg):
         num_users=cfg["data"]["num_users"],
         sample_limit=cfg["data"]["sample_limit"],
     )
-    labels = dataframe.apply(build_single_user_label, axis=1)
-    stratify_labels = labels if labels.value_counts().min() >= 2 and len(labels.unique()) <= int(len(dataframe) * float(cfg["data"]["test_size"])) else None
+    label_mode = get_label_mode(cfg)
+    if label_mode == "single_ce":
+        labels = dataframe.apply(build_single_user_label, axis=1)
+        stratify_labels = (
+            labels
+            if labels.value_counts().min() >= 2 and len(labels.unique()) <= int(len(dataframe) * float(cfg["data"]["test_size"]))
+            else None
+        )
+    elif label_mode in {"multi_bce", "multi_slot_ce"}:
+        stratify_labels = None
+    else:
+        raise ValueError(f"Unsupported data.label_mode: {label_mode}")
     train_df, val_df = train_test_split(
         dataframe,
         test_size=float(cfg["data"]["test_size"]),
@@ -120,28 +188,31 @@ def build_loaders(cfg):
     video_transform = build_video_transform(cfg["video_teacher"]["backbone"], cfg["video_teacher"]["weights"])
     dataset_kwargs = {
         "data_root": data_root,
-        "label_mode": "single_ce",
+        "label_mode": label_mode,
         "use_wifi": False,
         "use_video": True,
-        "target_len": 3000,
-        "pad_mode": "left",
-        "truncate_mode": "tail",
-        "normalize": "none",
+        "target_len": cfg["data"].get("target_len", 3000),
+        "pad_mode": cfg["data"].get("pad_mode", "left"),
+        "truncate_mode": cfg["data"].get("truncate_mode", "tail"),
+        "normalize": cfg["data"].get("normalize", "none"),
         "video_num_frames": cfg["video"]["num_frames"],
         "video_transform": video_transform,
     }
     train_dataset = WiMANSHARDataset(train_df, **dataset_kwargs)
     val_dataset = WiMANSHARDataset(val_df, **dataset_kwargs)
+    batch_size = int(cfg["train"]["batch_size"])
+    drop_last_train = bool(len(train_dataset) > batch_size and len(train_dataset) % batch_size == 1)
     train_loader = DataLoader(
         train_dataset,
-        batch_size=int(cfg["train"]["batch_size"]),
+        batch_size=batch_size,
         shuffle=True,
         num_workers=int(cfg["train"]["num_workers"]),
         pin_memory=torch.cuda.is_available(),
+        drop_last=drop_last_train,
     )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=int(cfg["train"]["batch_size"]),
+        batch_size=batch_size,
         shuffle=False,
         num_workers=int(cfg["train"]["num_workers"]),
         pin_memory=torch.cuda.is_available(),
@@ -150,6 +221,12 @@ def build_loaders(cfg):
 
 
 def build_model(cfg):
+    label_mode = get_label_mode(cfg)
+    num_classes = int(cfg["video_teacher"]["num_classes"])
+    if label_mode == "multi_slot_ce" and num_classes != 60:
+        raise ValueError("data.label_mode='multi_slot_ce' requires video_teacher.num_classes=60 for 6 slots x 10 classes")
+    if label_mode == "multi_bce" and num_classes != 54:
+        raise ValueError("data.label_mode='multi_bce' requires video_teacher.num_classes=54 for 6 slots x 9 activities")
     mode = str(cfg["video_teacher"].get("mode", "classifier")).lower()
     if mode == "projector":
         checkpoint = cfg["video_teacher"].get("checkpoint")
@@ -234,6 +311,62 @@ def prediction_filename(epoch: int, val_acc: float, val_loss: float) -> str:
     return f"val_predictions_epoch_{epoch:03d}_acc_{val_acc:.6f}_loss_{val_loss:.6f}.csv"
 
 
+def rewrite_csv_rows(path: Path, rows, fieldnames) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.unlink(missing_ok=True)
+    if rows:
+        append_csv_rows(path, rows, fieldnames)
+
+
+def refresh_top_prediction_files(
+    run_dir: Path,
+    top_records,
+    prediction_fieldnames: list,
+    compact_prediction_fieldnames: list,
+    save_detailed: bool = True,
+    save_compact: bool = True,
+    logger=None,
+):
+    top_dir = run_dir / "splits" / "top_predictions"
+    top_dir.mkdir(parents=True, exist_ok=True)
+    for old_file in top_dir.glob("val_predictions_top*.csv"):
+        old_file.unlink()
+
+    manifest_rows = []
+    for rank, record in enumerate(top_records, start=1):
+        epoch = int(record["epoch"])
+        val_acc = float(record["val_acc"])
+        prefix = f"top{rank:02d}_epoch_{epoch:03d}_acc_{val_acc:.6f}"
+        if save_detailed and record["prediction_rows"]:
+            rewrite_csv_rows(top_dir / f"val_predictions_{prefix}.csv", record["prediction_rows"], prediction_fieldnames)
+        if save_compact and record["compact_prediction_rows"]:
+            rewrite_csv_rows(
+                top_dir / f"val_predictions_{prefix}_compact.csv",
+                record["compact_prediction_rows"],
+                compact_prediction_fieldnames,
+            )
+        epoch_result = record["epoch_result"]
+        manifest_rows.append(
+            {
+                "rank": rank,
+                "epoch": epoch,
+                "val_acc": val_acc,
+                "val_loss": float(record["val_loss"]),
+                "official_slot_acc": epoch_result.get("official_slot_acc"),
+                "active_slot_acc": epoch_result.get("active_slot_acc"),
+                "sample_exact_acc": epoch_result.get("sample_exact_acc"),
+            }
+        )
+
+    rewrite_csv_rows(
+        top_dir / "top_epochs.csv",
+        manifest_rows,
+        ["rank", "epoch", "val_acc", "val_loss", "official_slot_acc", "active_slot_acc", "sample_exact_acc"],
+    )
+    if logger is not None:
+        logger.info("refreshed_top_prediction_files=%s count=%d", top_dir, len(top_records))
+
+
 def write_top_checkpoint_manifest(checkpoint_dir: Path, top_checkpoints):
     manifest_path = checkpoint_dir / "top_k_checkpoints.csv"
     manifest_path.unlink(missing_ok=True)
@@ -301,16 +434,107 @@ def build_video_model_summary(model, cfg):
     return summary
 
 
-def prediction_rows_from_batch(batch, logits, loss):
+def prediction_rows_from_batch(batch, logits, loss, cfg):
+    label_mode = get_label_mode(cfg)
+    threshold = get_threshold(cfg)
     labels = batch["label"].detach().cpu()
-    probs = torch.softmax(logits.detach().cpu(), dim=-1)
-    pred_ids = probs.argmax(dim=-1)
-    correct = pred_ids.eq(labels.long())
     sample_ids = batch["sample_id"]
     if isinstance(sample_ids, str):
         sample_ids = [sample_ids]
 
     rows = []
+    batch_size = int(labels.shape[0])
+    if label_mode == "multi_bce":
+        probs = torch.sigmoid(logits.detach().cpu()).reshape(batch_size, 6, 9)
+        pred_mask = (probs > threshold).long()
+        true_mask = labels.reshape(batch_size, 6, 9).long()
+        slot_correct = pred_mask.eq(true_mask).all(dim=-1)
+        active_slots = true_mask.sum(dim=-1) > 0
+        exact_sample = slot_correct.all(dim=-1)
+        for item_idx, sample_id in enumerate(sample_ids):
+            item_true = true_mask[item_idx]
+            item_pred = pred_mask[item_idx]
+            item_probs = probs[item_idx]
+            item_slot_correct = slot_correct[item_idx]
+            item_active = active_slots[item_idx]
+            active_total = int(item_active.long().sum().item())
+            active_correct = int((item_slot_correct & item_active).long().sum().item())
+            row = {
+                "sample_id": sample_id,
+                "task_mode": "multi_bce",
+                "threshold": threshold,
+                "loss": float(loss.item()),
+                "slot_correct_count": int(item_slot_correct.long().sum().item()),
+                "slot_total": 6,
+                "official_slot_accuracy": float(item_slot_correct.float().mean().item()),
+                "active_slot_correct_count": active_correct,
+                "active_slot_total": active_total,
+                "active_slot_accuracy": "" if active_total == 0 else float(active_correct / active_total),
+                "exact_sample_correct": int(bool(exact_sample[item_idx].item())),
+            }
+            for slot_idx in range(6):
+                true_vec = item_true[slot_idx].tolist()
+                pred_vec = item_pred[slot_idx].tolist()
+                row[f"slot_{slot_idx + 1}_true_activity"] = _activity_vector_to_text(true_vec)
+                row[f"slot_{slot_idx + 1}_pred_activity"] = _activity_vector_to_text(pred_vec)
+                row[f"slot_{slot_idx + 1}_correct"] = int(bool(item_slot_correct[slot_idx].item()))
+                row[f"slot_{slot_idx + 1}_active"] = int(bool(item_active[slot_idx].item()))
+                for class_id, class_name in ID_TO_ACTIVITY.items():
+                    row[f"true_s{slot_idx + 1}_c{class_id}"] = int(true_vec[class_id])
+                    row[f"pred_s{slot_idx + 1}_c{class_id}"] = int(pred_vec[class_id])
+                    row[f"prob_s{slot_idx + 1}_{class_name}"] = float(item_probs[slot_idx, class_id].item())
+            rows.append(row)
+        return rows
+
+    if label_mode == "multi_slot_ce":
+        probs = torch.softmax(logits.detach().cpu().reshape(batch_size, 6, 10), dim=-1)
+        pred_classes = probs.argmax(dim=-1).long()
+        true_classes = labels.reshape(batch_size, 6).long()
+        slot_correct = pred_classes.eq(true_classes)
+        active_slots = true_classes > 0
+        exact_sample = slot_correct.all(dim=-1)
+        for item_idx, sample_id in enumerate(sample_ids):
+            item_true = true_classes[item_idx]
+            item_pred = pred_classes[item_idx]
+            item_probs = probs[item_idx]
+            item_slot_correct = slot_correct[item_idx]
+            item_active = active_slots[item_idx]
+            active_total = int(item_active.long().sum().item())
+            active_correct = int((item_slot_correct & item_active).long().sum().item())
+            row = {
+                "sample_id": sample_id,
+                "task_mode": "multi_slot_ce",
+                "loss": float(loss.item()),
+                "slot_correct_count": int(item_slot_correct.long().sum().item()),
+                "slot_total": 6,
+                "official_slot_accuracy": float(item_slot_correct.float().mean().item()),
+                "active_slot_correct_count": active_correct,
+                "active_slot_total": active_total,
+                "active_slot_accuracy": "" if active_total == 0 else float(active_correct / active_total),
+                "exact_sample_correct": int(bool(exact_sample[item_idx].item())),
+            }
+            for slot_idx in range(6):
+                true_id = int(item_true[slot_idx].item())
+                pred_id = int(item_pred[slot_idx].item())
+                true_vec = _slot_class_to_activity_vector(true_id)
+                pred_vec = _slot_class_to_activity_vector(pred_id)
+                row[f"slot_{slot_idx + 1}_true_id"] = true_id
+                row[f"slot_{slot_idx + 1}_pred_id"] = pred_id
+                row[f"slot_{slot_idx + 1}_true_activity"] = _slot_class_to_text(true_id)
+                row[f"slot_{slot_idx + 1}_pred_activity"] = _slot_class_to_text(pred_id)
+                row[f"slot_{slot_idx + 1}_correct"] = int(bool(item_slot_correct[slot_idx].item()))
+                row[f"slot_{slot_idx + 1}_active"] = int(bool(item_active[slot_idx].item()))
+                row[f"prob_s{slot_idx + 1}_empty_slot"] = float(item_probs[slot_idx, 0].item())
+                for class_id, class_name in ID_TO_ACTIVITY.items():
+                    row[f"true_s{slot_idx + 1}_c{class_id}"] = int(true_vec[class_id])
+                    row[f"pred_s{slot_idx + 1}_c{class_id}"] = int(pred_vec[class_id])
+                    row[f"prob_s{slot_idx + 1}_{class_name}"] = float(item_probs[slot_idx, class_id + 1].item())
+            rows.append(row)
+        return rows
+
+    probs = torch.softmax(logits.detach().cpu(), dim=-1)
+    pred_ids = probs.argmax(dim=-1)
+    correct = pred_ids.eq(labels.long())
     for item_idx, sample_id in enumerate(sample_ids):
         true_id = int(labels[item_idx].item())
         pred_id = int(pred_ids[item_idx].item())
@@ -341,6 +565,10 @@ def run_epoch(model, loader, optimizer, scaler, device, cfg, epoch, logger=None,
     accumulation_steps = max(int(cfg["train"].get("gradient_accumulation_steps", 1)), 1)
     use_amp = bool(cfg["train"].get("amp", False)) and device.type == "cuda"
     grad_clip_norm = cfg["train"].get("grad_clip_norm")
+    label_mode = get_label_mode(cfg)
+    threshold = get_threshold(cfg)
+    bce_pos_weight = get_bce_pos_weight(cfg)
+    slot_class_weights = get_slot_ce_class_weights(cfg)
     samples_seen = 0
     optimizer_step = 0
     optimizer.zero_grad(set_to_none=True)
@@ -351,7 +579,13 @@ def run_epoch(model, loader, optimizer, scaler, device, cfg, epoch, logger=None,
 
         with torch.autocast(device_type=device.type, enabled=use_amp):
             logits = model(video)
-            loss = classification_loss(logits, labels, "single_ce")
+            loss = classification_loss(
+                logits,
+                labels,
+                label_mode,
+                pos_weight=bce_pos_weight,
+                slot_class_weights=slot_class_weights,
+            )
 
         window_start = ((batch_idx - 1) // accumulation_steps) * accumulation_steps + 1
         window_end = min(window_start + accumulation_steps - 1, len(loader))
@@ -367,9 +601,9 @@ def run_epoch(model, loader, optimizer, scaler, device, cfg, epoch, logger=None,
             optimizer.zero_grad(set_to_none=True)
             optimizer_step += 1
 
-        batch_acc = accuracy_top1(logits.detach(), labels.detach())
-        total_loss += float(loss.item())
-        total_acc += batch_acc
+        batch_acc = accuracy_for_mode(logits.detach(), labels.detach(), label_mode, threshold=threshold)
+        total_loss += float(loss.item()) * int(labels.shape[0])
+        total_acc += batch_acc * int(labels.shape[0])
         samples_seen += int(labels.shape[0])
         row = {
             "epoch": epoch,
@@ -403,24 +637,37 @@ def run_epoch(model, loader, optimizer, scaler, device, cfg, epoch, logger=None,
             ["epoch", "batch", "samples_seen", "loss", "accuracy", "batch_size", "accumulation_step", "optimizer_step"],
         )
 
-    return total_loss / max(len(loader), 1), total_acc / max(len(loader), 1)
+    return total_loss / max(samples_seen, 1), total_acc / max(samples_seen, 1)
 
 
 @torch.no_grad()
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, cfg):
     model.eval()
     total_loss = 0.0
     total_acc = 0.0
+    total_samples = 0
     rows = []
+    label_mode = get_label_mode(cfg)
+    threshold = get_threshold(cfg)
+    bce_pos_weight = get_bce_pos_weight(cfg)
+    slot_class_weights = get_slot_ce_class_weights(cfg)
     for batch in loader:
         video = batch["video"].float().to(device)
         labels = batch["label"].to(device)
         logits = model(video)
-        loss = classification_loss(logits, labels, "single_ce")
-        total_loss += float(loss.item())
-        total_acc += accuracy_top1(logits, labels)
-        rows.extend(prediction_rows_from_batch(batch, logits, loss))
-    return total_loss / max(len(loader), 1), total_acc / max(len(loader), 1), rows
+        loss = classification_loss(
+            logits,
+            labels,
+            label_mode,
+            pos_weight=bce_pos_weight,
+            slot_class_weights=slot_class_weights,
+        )
+        batch_size = int(labels.shape[0])
+        total_loss += float(loss.item()) * batch_size
+        total_acc += accuracy_for_mode(logits, labels, label_mode, threshold=threshold) * batch_size
+        total_samples += batch_size
+        rows.extend(prediction_rows_from_batch(batch, logits, loss, cfg))
+    return total_loss / max(total_samples, 1), total_acc / max(total_samples, 1), rows
 
 
 def main():
@@ -460,10 +707,12 @@ def main():
     logger.info("model_summary:\n%s", yaml.safe_dump(summary, allow_unicode=True, sort_keys=False))
     model = model.to(device)
 
+    label_mode = get_label_mode(cfg)
+    task_prefix = "multi_user" if label_mode in {"multi_bce", "multi_slot_ce"} else "single_person"
     class_names = [ID_TO_ACTIVITY[class_id] for class_id in sorted(ID_TO_ACTIVITY)]
     result_payload = build_wimans_result_payload(
         model_name=f"{normalize_video_backbone_name(cfg['video_teacher']['backbone'])}_{cfg['video_teacher'].get('mode', 'classifier')}",
-        task=f"single_person_video_teacher_{cfg['video_teacher'].get('mode', 'classifier')}",
+        task=f"{task_prefix}_video_teacher_{cfg['video_teacher'].get('mode', 'classifier')}",
         cfg=cfg,
         model_summary=summary,
     )
@@ -477,8 +726,26 @@ def main():
     best_acc = -1.0
     keep_top_k = max(int(cfg["train"].get("keep_top_k", 3)), 1)
     top_checkpoints = []
+    top_prediction_records = []
     best_checkpoint_path = None
-    epoch_fieldnames = ["epoch", "train_loss", "train_acc", "val_loss", "val_acc", "best_acc", "lr_backbone", "lr_head"]
+    logging_cfg = cfg.get("logging", {})
+    save_epoch_predictions = bool(logging_cfg.get("save_epoch_predictions", True))
+    save_best_detailed_predictions = bool(logging_cfg.get("save_best_detailed_predictions", True))
+    save_compact_predictions = bool(logging_cfg.get("save_compact_predictions", True))
+    save_topk_predictions = max(int(logging_cfg.get("save_topk_predictions", keep_top_k)), 0)
+    epoch_fieldnames = [
+        "epoch",
+        "train_loss",
+        "train_acc",
+        "val_loss",
+        "val_acc",
+        "best_acc",
+        "official_slot_acc",
+        "active_slot_acc",
+        "sample_exact_acc",
+        "lr_backbone",
+        "lr_head",
+    ]
     for epoch in range(1, int(cfg["train"]["epochs"]) + 1):
         lrs_before = current_lrs(optimizer)
         logger.info(
@@ -498,12 +765,15 @@ def main():
             logger=logger,
             batch_csv_path=run_dir / "metrics" / "train_batches.csv",
         )
-        val_loss, val_acc, prediction_rows = evaluate(model, val_loader, device)
+        val_loss, val_acc, prediction_rows = evaluate(model, val_loader, device, cfg)
         scheduler.step(val_acc)
         lrs_after = current_lrs(optimizer)
-        if prediction_rows:
+        prediction_fieldnames = list(prediction_rows[0].keys()) if prediction_rows else []
+        compact_prediction_rows_epoch = compact_prediction_rows(prediction_rows)
+        compact_prediction_fieldnames = list(compact_prediction_rows_epoch[0].keys()) if compact_prediction_rows_epoch else []
+        if prediction_rows and save_epoch_predictions:
             prediction_path = run_dir / "splits" / f"val_predictions_epoch_{epoch:03d}.csv"
-            append_csv_rows(prediction_path, prediction_rows, list(prediction_rows[0].keys()))
+            append_csv_rows(prediction_path, prediction_rows, prediction_fieldnames)
             logger.info("saved_val_predictions=%s", prediction_path)
 
         message = (
@@ -513,6 +783,17 @@ def main():
         print(message)
         logger.info(message)
 
+        epoch_result = build_epoch_result(
+            epoch,
+            train_loss,
+            train_acc,
+            val_loss,
+            val_acc,
+            prediction_rows,
+            class_names,
+            split_df=val_df,
+            lrs=lrs_after,
+        )
         epoch_row = {
             "epoch": epoch,
             "train_loss": train_loss,
@@ -520,23 +801,39 @@ def main():
             "val_loss": val_loss,
             "val_acc": val_acc,
             "best_acc": max(best_acc, val_acc),
+            "official_slot_acc": epoch_result.get("official_slot_acc"),
+            "active_slot_acc": epoch_result.get("active_slot_acc"),
+            "sample_exact_acc": epoch_result.get("sample_exact_acc"),
             "lr_backbone": lrs_after.get("backbone", float("nan")),
             "lr_head": lrs_after.get("head", float("nan")),
         }
         append_csv_rows(run_dir / "metrics" / "epochs.csv", [epoch_row], epoch_fieldnames)
-        epoch_results.append(
-            build_epoch_result(
-                epoch,
-                train_loss,
-                train_acc,
-                val_loss,
-                val_acc,
-                prediction_rows,
-                class_names,
-                split_df=val_df,
-                lrs=lrs_after,
+        epoch_results.append(epoch_result)
+
+        if prediction_rows and save_topk_predictions > 0:
+            top_prediction_records.append(
+                {
+                    "epoch": epoch,
+                    "val_acc": float(val_acc),
+                    "val_loss": float(val_loss),
+                    "epoch_result": epoch_result,
+                    "prediction_rows": list(prediction_rows),
+                    "compact_prediction_rows": list(compact_prediction_rows_epoch),
+                }
             )
-        )
+            top_prediction_records = sorted(
+                top_prediction_records,
+                key=lambda item: (-float(item["val_acc"]), float(item["val_loss"]), -int(item["epoch"])),
+            )[:save_topk_predictions]
+            refresh_top_prediction_files(
+                run_dir,
+                top_prediction_records,
+                prediction_fieldnames,
+                compact_prediction_fieldnames,
+                save_detailed=save_best_detailed_predictions,
+                save_compact=save_compact_predictions,
+                logger=logger,
+            )
 
         candidate = {
             "epoch": epoch,
@@ -553,7 +850,7 @@ def main():
             if prediction_rows:
                 top_prediction_path = run_dir / "splits" / prediction_filename(epoch, val_acc, val_loss)
                 top_prediction_path.unlink(missing_ok=True)
-                append_csv_rows(top_prediction_path, prediction_rows, list(prediction_rows[0].keys()))
+                append_csv_rows(top_prediction_path, prediction_rows, prediction_fieldnames)
 
             save_checkpoint(
                 str(checkpoint_path),
@@ -617,10 +914,16 @@ def main():
                     },
                 )
                 if prediction_rows:
-                    best_prediction_path = run_dir / "splits" / "val_predictions_best.csv"
-                    best_prediction_path.unlink(missing_ok=True)
-                    append_csv_rows(best_prediction_path, prediction_rows, list(prediction_rows[0].keys()))
-                    logger.info("saved_best_val_predictions=%s", best_prediction_path)
+                    if save_best_detailed_predictions:
+                        best_prediction_path = run_dir / "splits" / "val_predictions_best.csv"
+                        best_prediction_path.unlink(missing_ok=True)
+                        append_csv_rows(best_prediction_path, prediction_rows, prediction_fieldnames)
+                        logger.info("saved_best_val_predictions=%s", best_prediction_path)
+                    if save_compact_predictions and compact_prediction_rows_epoch:
+                        compact_prediction_path = run_dir / "splits" / "val_predictions_best_compact.csv"
+                        compact_prediction_path.unlink(missing_ok=True)
+                        append_csv_rows(compact_prediction_path, compact_prediction_rows_epoch, compact_prediction_fieldnames)
+                        logger.info("saved_best_compact_val_predictions=%s", compact_prediction_path)
                 logger.info(
                     "saved_best_checkpoint=%s val_acc=%.6f val_loss=%.6f",
                     run_dir / "checkpoints" / "best.pt",
