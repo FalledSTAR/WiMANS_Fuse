@@ -114,3 +114,4 @@ logging:
   save_epoch_predictions: false
   save_best_detailed_predictions: true
   save_compact_predictions: true
+  save_topk_predictions: 10
