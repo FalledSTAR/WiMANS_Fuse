@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from datasets import ID_TO_ACTIVITY, WiMANSHARDataset, build_single_user_dataframe, build_single_user_label  # noqa: E402
-from losses import CAFDLoss, RSDLoss, classification_loss  # noqa: E402
+from losses import CAFDLoss, FeatureMSEKDLoss, LogitsKDLoss, RSDLoss, classification_loss  # noqa: E402
 from models import CNN1DWiFi, VideoWiFiCAFDModel, XFiWiFiOriginalFC, XFiWiFiStudent  # noqa: E402
 from utils import (  # noqa: E402
     accuracy_for_mode,
@@ -63,6 +63,11 @@ def parse_args():
     parser.add_argument("--rsd-kappa", type=float, default=None)
     parser.add_argument("--rsd-warmup-epochs", type=int, default=None)
     parser.add_argument("--rsd-reduction", choices=["sum", "mean"], default=None)
+    parser.add_argument("--lambda-mse-kd", type=float, default=None)
+    parser.add_argument("--lambda-logits-kd", type=float, default=None)
+    parser.add_argument("--lambda-teacher", type=float, default=None)
+    parser.add_argument("--kd-temperature", type=float, default=None)
+    parser.add_argument("--kd-warmup-epochs", type=int, default=None)
     return parser.parse_args()
 
 
@@ -216,11 +221,15 @@ def build_model(cfg, stage: str):
         s3d_weights=cfg["video"]["s3d_weights"],
         teacher_checkpoint_path=teacher_checkpoint_path,
         freeze_s3d=cfg["video"]["freeze_s3d"],
+        s3d_trainable_last_blocks=int(cfg["video"].get("s3d_trainable_last_blocks", 0)),
+        s3d_trainable_classifier=bool(cfg["video"].get("s3d_trainable_classifier", False)),
         projector_hidden_dim=cfg["projector"]["hidden_dim"],
         projector_out_dim=cfg["projector"]["out_dim"],
         projector_num_heads=cfg["projector"]["num_heads"],
         projector_target=str(cfg["projector"].get("target", "video_feature")),
         freeze_video_projector=bool(cfg["projector"].get("freeze_video_projector", True)),
+        freeze_projector_classifier=bool(cfg["projector"].get("freeze_projector_classifier", True)),
+        require_projector_checkpoint=bool(cfg["projector"].get("require_projector_checkpoint", True)),
         use_projector_logits=bool(cfg["projector"].get("use_projector_logits", True)),
         projector_dropout=float(cfg["projector"].get("dropout", 0.2)),
         rsd_gamma=int(cfg.get("rsd", {}).get("gamma", 2)),
@@ -372,14 +381,66 @@ def get_rsd_cfg(cfg) -> dict:
     }
 
 
-def effective_rsd_lambda(rsd_cfg: dict, epoch: int) -> float:
-    target = float(rsd_cfg["lambda_rsd"])
-    warmup_epochs = int(rsd_cfg.get("warmup_epochs", 0))
-    if not rsd_cfg["enabled"] or target <= 0:
+def get_mse_kd_cfg(cfg) -> dict:
+    mse_cfg = cfg.get("mse_kd", {})
+    lambda_mse = float(mse_cfg.get("lambda_mse", 0.0))
+    return {
+        "enabled": bool(mse_cfg.get("enable", False)) and lambda_mse > 0,
+        "lambda_mse": lambda_mse,
+        "warmup_epochs": int(mse_cfg.get("warmup_epochs", 0)),
+        "source": str(mse_cfg.get("source", "distill")),
+        "normalize": bool(mse_cfg.get("normalize", False)),
+    }
+
+
+def get_logits_kd_cfg(cfg) -> dict:
+    logits_cfg = cfg.get("logits_kd", {})
+    lambda_logits = float(logits_cfg.get("lambda_logits", 0.0))
+    return {
+        "enabled": bool(logits_cfg.get("enable", False)) and lambda_logits > 0,
+        "lambda_logits": lambda_logits,
+        "temperature": float(logits_cfg.get("temperature", 4.0)),
+        "warmup_epochs": int(logits_cfg.get("warmup_epochs", 0)),
+    }
+
+
+def get_teacher_supervised_cfg(cfg) -> dict:
+    teacher_cfg = cfg.get("teacher_supervised", {})
+    lambda_teacher = float(teacher_cfg.get("lambda_teacher", 0.0))
+    return {
+        "enabled": bool(teacher_cfg.get("enable", False)) and lambda_teacher > 0,
+        "lambda_teacher": lambda_teacher,
+        "warmup_epochs": int(teacher_cfg.get("warmup_epochs", 0)),
+    }
+
+
+def effective_warmup_lambda(enabled: bool, target: float, warmup_epochs: int, epoch: int) -> float:
+    target = float(target)
+    if not enabled or target <= 0:
         return 0.0
+    warmup_epochs = int(warmup_epochs)
     if warmup_epochs <= 0:
         return target
     return target * min(max(int(epoch), 1) / warmup_epochs, 1.0)
+
+
+def effective_rsd_lambda(rsd_cfg: dict, epoch: int) -> float:
+    return effective_warmup_lambda(
+        rsd_cfg["enabled"],
+        rsd_cfg["lambda_rsd"],
+        int(rsd_cfg.get("warmup_epochs", 0)),
+        epoch,
+    )
+
+
+def select_mse_kd_pair(outputs: dict, source: str):
+    if source == "distill":
+        return outputs["wifi_distill_feature"], outputs["teacher_distill_feature"]
+    if source in {"video_feature", "teacher_feature"}:
+        return outputs["wifi_projected"], outputs["video_feature"]
+    if source == "projected":
+        return outputs["wifi_projected"], outputs["video_projected"]
+    raise ValueError(f"Unsupported mse_kd.source: {source}")
 
 
 def select_rsd_pair(outputs: dict, source: str):
@@ -412,7 +473,21 @@ def safe_teacher_accuracy(teacher_logits: torch.Tensor, labels: torch.Tensor, la
     return None
 
 
-def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_loss_fn=None, rsd_loss_fn=None, logger=None, batch_csv_path=None):
+def run_epoch(
+    model,
+    loader,
+    optimizer,
+    device,
+    stage,
+    cfg,
+    epoch: int,
+    cafd_loss_fn=None,
+    rsd_loss_fn=None,
+    mse_kd_loss_fn=None,
+    logits_kd_loss_fn=None,
+    logger=None,
+    batch_csv_path=None,
+):
     model.train()
     total_loss = 0.0
     total_correct = 0.0
@@ -421,11 +496,32 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
     log_interval = max(int(cfg["train"].get("log_interval", 50)), 1)
     cafd_cfg = get_cafd_cfg(cfg)
     rsd_cfg = get_rsd_cfg(cfg)
+    mse_kd_cfg = get_mse_kd_cfg(cfg)
+    logits_kd_cfg = get_logits_kd_cfg(cfg)
+    teacher_supervised_cfg = get_teacher_supervised_cfg(cfg)
     label_mode = get_label_mode(cfg)
     threshold = get_threshold(cfg)
     bce_pos_weight = get_bce_pos_weight(cfg)
     slot_class_weights = get_slot_ce_class_weights(cfg)
     lambda_rsd_effective = effective_rsd_lambda(rsd_cfg, epoch)
+    lambda_mse_effective = effective_warmup_lambda(
+        mse_kd_cfg["enabled"],
+        mse_kd_cfg["lambda_mse"],
+        mse_kd_cfg["warmup_epochs"],
+        epoch,
+    )
+    lambda_logits_effective = effective_warmup_lambda(
+        logits_kd_cfg["enabled"],
+        logits_kd_cfg["lambda_logits"],
+        logits_kd_cfg["warmup_epochs"],
+        epoch,
+    )
+    lambda_teacher_effective = effective_warmup_lambda(
+        teacher_supervised_cfg["enabled"],
+        teacher_supervised_cfg["lambda_teacher"],
+        teacher_supervised_cfg["warmup_epochs"],
+        epoch,
+    )
     samples_seen = 0
     for batch_idx, batch in enumerate(loader, start=1):
         wifi = batch["wifi"].float().to(device)
@@ -457,6 +553,15 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             rsd_decorrelation_value = None
             rsd_diag_mean_value = None
             rsd_offdiag_abs_mean_value = None
+            mse_kd_loss_value = None
+            mse_kd_weighted_value = None
+            lambda_mse_value = None
+            logits_kd_loss_value = None
+            logits_kd_weighted_value = None
+            lambda_logits_value = None
+            teacher_loss_value = None
+            teacher_weighted_value = None
+            lambda_teacher_value = None
             teacher_acc_value = None
         else:
             video = batch["video"].float().to(device)
@@ -485,6 +590,37 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
                 student_rsd, teacher_rsd = select_rsd_pair(outputs, rsd_cfg["source"])
                 rsd_value, rsd_details = rsd_loss_fn(student_rsd, teacher_rsd, return_details=True)
                 loss = loss + lambda_rsd_effective * rsd_value
+            mse_kd_value = None
+            if mse_kd_loss_fn is not None and mse_kd_cfg["enabled"] and lambda_mse_effective > 0:
+                student_mse, teacher_mse = select_mse_kd_pair(outputs, mse_kd_cfg["source"])
+                mse_kd_value = mse_kd_loss_fn(student_mse, teacher_mse)
+                loss = loss + lambda_mse_effective * mse_kd_value
+            logits_kd_value = None
+            if logits_kd_loss_fn is not None and logits_kd_cfg["enabled"] and lambda_logits_effective > 0:
+                logits_kd_value = logits_kd_loss_fn(
+                    logits,
+                    outputs.get("teacher_logits"),
+                    label_mode=label_mode,
+                )
+                loss = loss + lambda_logits_effective * logits_kd_value
+            teacher_loss = None
+            if teacher_supervised_cfg["enabled"] and lambda_teacher_effective > 0:
+                teacher_logits = outputs.get("teacher_logits")
+                if teacher_logits is None:
+                    raise ValueError("teacher_supervised requires teacher_logits, got None")
+                if tuple(teacher_logits.shape) != tuple(logits.shape):
+                    raise ValueError(
+                        "teacher_supervised expects teacher logits to match student logits, "
+                        f"got teacher={tuple(teacher_logits.shape)} student={tuple(logits.shape)}"
+                    )
+                teacher_loss = classification_loss(
+                    teacher_logits,
+                    labels,
+                    label_mode,
+                    pos_weight=bce_pos_weight,
+                    slot_class_weights=slot_class_weights,
+                )
+                loss = loss + lambda_teacher_effective * teacher_loss
             cls_loss_value = float(cls_loss.item())
             cafd_loss_value = None if cafd_loss is None else float(cafd_loss.item())
             cafd_weighted_mse_value = None if cafd_details is None else float(cafd_details["weighted_mse"].item())
@@ -499,6 +635,19 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             rsd_decorrelation_value = None if rsd_details is None else float(rsd_details["decorrelation"].item())
             rsd_diag_mean_value = None if rsd_details is None else float(rsd_details["diag_mean"].item())
             rsd_offdiag_abs_mean_value = None if rsd_details is None else float(rsd_details["offdiag_abs_mean"].item())
+            mse_kd_loss_value = None if mse_kd_value is None else float(mse_kd_value.item())
+            mse_kd_weighted_value = None if mse_kd_value is None else float((lambda_mse_effective * mse_kd_value).item())
+            lambda_mse_value = lambda_mse_effective
+            logits_kd_loss_value = None if logits_kd_value is None else float(logits_kd_value.item())
+            logits_kd_weighted_value = (
+                None if logits_kd_value is None else float((lambda_logits_effective * logits_kd_value).item())
+            )
+            lambda_logits_value = lambda_logits_effective
+            teacher_loss_value = None if teacher_loss is None else float(teacher_loss.item())
+            teacher_weighted_value = (
+                None if teacher_loss is None else float((lambda_teacher_effective * teacher_loss).item())
+            )
+            lambda_teacher_value = lambda_teacher_effective
             teacher_acc_value = (
                 safe_teacher_accuracy(outputs.get("teacher_logits"), labels, label_mode, threshold)
                 if should_log_teacher_accuracy(cfg, label_mode)
@@ -531,6 +680,15 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
             "rsd_decorrelation": rsd_decorrelation_value,
             "rsd_diag_mean": rsd_diag_mean_value,
             "rsd_offdiag_abs_mean": rsd_offdiag_abs_mean_value,
+            "mse_kd_loss": mse_kd_loss_value,
+            "mse_kd_weighted_loss": mse_kd_weighted_value,
+            "lambda_mse_kd_effective": lambda_mse_value,
+            "logits_kd_loss": logits_kd_loss_value,
+            "logits_kd_weighted_loss": logits_kd_weighted_value,
+            "lambda_logits_kd_effective": lambda_logits_value,
+            "teacher_supervised_loss": teacher_loss_value,
+            "teacher_supervised_weighted_loss": teacher_weighted_value,
+            "lambda_teacher_supervised_effective": lambda_teacher_value,
             "teacher_accuracy": teacher_acc_value,
             "accuracy": batch_acc,
             "batch_size": int(labels.shape[0]),
@@ -539,7 +697,7 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
 
         if logger is not None and (batch_idx == 1 or batch_idx % log_interval == 0 or batch_idx == len(loader)):
             logger.info(
-                "train epoch=%s batch=%s/%s loss=%.6f cls_loss=%.6f cafd_loss=%s cafd_weighted_mse=%s cafd_correlation=%s cafd_diagonal_gap=%s cafd_relation_kl=%s cafd_plain_mse=%s rsd_loss=%s rsd_weighted=%s lambda_rsd=%s rsd_diag_mean=%s rsd_offdiag_abs_mean=%s teacher_acc=%s acc=%.6f",
+                "train epoch=%s batch=%s/%s loss=%.6f cls_loss=%.6f cafd_loss=%s cafd_weighted_mse=%s cafd_correlation=%s cafd_diagonal_gap=%s cafd_relation_kl=%s cafd_plain_mse=%s rsd_loss=%s rsd_weighted=%s lambda_rsd=%s mse_kd=%s mse_kd_weighted=%s lambda_mse=%s logits_kd=%s logits_kd_weighted=%s lambda_logits=%s teacher_loss=%s teacher_weighted=%s lambda_teacher=%s rsd_diag_mean=%s rsd_offdiag_abs_mean=%s teacher_acc=%s acc=%.6f",
                 epoch,
                 batch_idx,
                 len(loader),
@@ -554,6 +712,15 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
                 "None" if row["rsd_loss"] is None else f"{row['rsd_loss']:.6f}",
                 "None" if row["rsd_weighted_loss"] is None else f"{row['rsd_weighted_loss']:.6f}",
                 "None" if row["lambda_rsd_effective"] is None else f"{row['lambda_rsd_effective']:.6f}",
+                "None" if row["mse_kd_loss"] is None else f"{row['mse_kd_loss']:.6f}",
+                "None" if row["mse_kd_weighted_loss"] is None else f"{row['mse_kd_weighted_loss']:.6f}",
+                "None" if row["lambda_mse_kd_effective"] is None else f"{row['lambda_mse_kd_effective']:.6f}",
+                "None" if row["logits_kd_loss"] is None else f"{row['logits_kd_loss']:.6f}",
+                "None" if row["logits_kd_weighted_loss"] is None else f"{row['logits_kd_weighted_loss']:.6f}",
+                "None" if row["lambda_logits_kd_effective"] is None else f"{row['lambda_logits_kd_effective']:.6f}",
+                "None" if row["teacher_supervised_loss"] is None else f"{row['teacher_supervised_loss']:.6f}",
+                "None" if row["teacher_supervised_weighted_loss"] is None else f"{row['teacher_supervised_weighted_loss']:.6f}",
+                "None" if row["lambda_teacher_supervised_effective"] is None else f"{row['lambda_teacher_supervised_effective']:.6f}",
                 "None" if row["rsd_diag_mean"] is None else f"{row['rsd_diag_mean']:.6f}",
                 "None" if row["rsd_offdiag_abs_mean"] is None else f"{row['rsd_offdiag_abs_mean']:.6f}",
                 "None" if row["teacher_accuracy"] is None else f"{row['teacher_accuracy']:.6f}",
@@ -583,6 +750,15 @@ def run_epoch(model, loader, optimizer, device, stage, cfg, epoch: int, cafd_los
                 "rsd_decorrelation",
                 "rsd_diag_mean",
                 "rsd_offdiag_abs_mean",
+                "mse_kd_loss",
+                "mse_kd_weighted_loss",
+                "lambda_mse_kd_effective",
+                "logits_kd_loss",
+                "logits_kd_weighted_loss",
+                "lambda_logits_kd_effective",
+                "teacher_supervised_loss",
+                "teacher_supervised_weighted_loss",
+                "lambda_teacher_supervised_effective",
                 "teacher_accuracy",
                 "accuracy",
                 "batch_size",
@@ -856,6 +1032,20 @@ def main():
         cfg.setdefault("rsd", {})["warmup_epochs"] = args.rsd_warmup_epochs
     if args.rsd_reduction is not None:
         cfg.setdefault("rsd", {})["reduction"] = args.rsd_reduction
+    if args.lambda_mse_kd is not None:
+        cfg.setdefault("mse_kd", {})["lambda_mse"] = args.lambda_mse_kd
+        cfg["mse_kd"]["enable"] = args.lambda_mse_kd > 0
+    if args.lambda_logits_kd is not None:
+        cfg.setdefault("logits_kd", {})["lambda_logits"] = args.lambda_logits_kd
+        cfg["logits_kd"]["enable"] = args.lambda_logits_kd > 0
+    if args.lambda_teacher is not None:
+        cfg.setdefault("teacher_supervised", {})["lambda_teacher"] = args.lambda_teacher
+        cfg["teacher_supervised"]["enable"] = args.lambda_teacher > 0
+    if args.kd_temperature is not None:
+        cfg.setdefault("logits_kd", {})["temperature"] = args.kd_temperature
+    if args.kd_warmup_epochs is not None:
+        cfg.setdefault("mse_kd", {})["warmup_epochs"] = args.kd_warmup_epochs
+        cfg.setdefault("logits_kd", {})["warmup_epochs"] = args.kd_warmup_epochs
     seed_everything(int(cfg["experiment"]["seed"]))
     device = select_device(cfg["train"]["device"])
 
@@ -905,9 +1095,10 @@ def main():
         logger.info("projector_classifier_checkpoint_load_info=%s", model.projector_classifier_checkpoint_load_info)
     if args.stage == "v1":
         logger.info(
-            "projector target=%s freeze_video_projector=%s use_projector_logits=%s return_teacher_logits=%s teacher_logits_source=%s wifi_projector_out_dim=%d rsd_projector_out_dim=%d rsd_projector_trainable_params=%d video_projector_trainable_params=%d",
+            "projector target=%s freeze_video_projector=%s freeze_projector_classifier=%s use_projector_logits=%s return_teacher_logits=%s teacher_logits_source=%s wifi_projector_out_dim=%d rsd_projector_out_dim=%d rsd_projector_trainable_params=%d video_projector_trainable_params=%d projector_classifier_trainable_params=%d s3d_trainable_params=%d",
             getattr(model, "projector_target", "unknown"),
             getattr(model, "freeze_video_projector", None),
+            getattr(model, "freeze_projector_classifier", None),
             getattr(model, "use_projector_logits_requested", None),
             getattr(model, "return_teacher_logits", None),
             getattr(model, "teacher_logits_source", "unknown"),
@@ -915,6 +1106,8 @@ def main():
             model.rsd_projector.net[-1].out_features,
             sum(p.numel() for p in model.rsd_projector.parameters() if p.requires_grad),
             sum(p.numel() for p in model.video_projector.parameters() if p.requires_grad),
+            sum(p.numel() for p in model.projector_classifier.parameters() if p.requires_grad),
+            sum(p.numel() for p in model.video_teacher.parameters() if p.requires_grad),
         )
     model_text = str(model)
     (run_dir / "model.txt").write_text(model_text, encoding="utf-8")
@@ -937,6 +1130,9 @@ def main():
     class_names = [ID_TO_ACTIVITY[class_id] for class_id in sorted(ID_TO_ACTIVITY)]
     cafd_cfg = get_cafd_cfg(cfg)
     rsd_cfg = get_rsd_cfg(cfg)
+    mse_kd_cfg = get_mse_kd_cfg(cfg)
+    logits_kd_cfg = get_logits_kd_cfg(cfg)
+    teacher_supervised_cfg = get_teacher_supervised_cfg(cfg)
     if args.stage == "v0":
         model_name = f"{cfg['model'].get('wifi_backbone', 'xfi_resnet18')}_{cfg['model'].get('wifi_student', 'token_pool')}"
     else:
@@ -945,6 +1141,10 @@ def main():
             model_parts.append("cafd")
         if rsd_cfg["enabled"]:
             model_parts.append("rsd")
+        if mse_kd_cfg["enabled"]:
+            model_parts.append("mse_kd")
+        if logits_kd_cfg["enabled"]:
+            model_parts.append("logits_kd")
         model_name = "_with_".join(model_parts)
     result_payload = build_wimans_result_payload(
         model_name=model_name,
@@ -959,6 +1159,8 @@ def main():
 
     cafd_loss_fn = None
     rsd_loss_fn = None
+    mse_kd_loss_fn = None
+    logits_kd_loss_fn = None
     if args.stage == "v1":
         if cafd_cfg["enabled"]:
             cafd_loss_fn = CAFDLoss(
@@ -983,6 +1185,37 @@ def main():
             rsd_cfg["gamma"],
             rsd_cfg["warmup_epochs"],
             rsd_cfg["reduction"],
+        )
+        if mse_kd_cfg["enabled"]:
+            mse_kd_loss_fn = FeatureMSEKDLoss(normalize=mse_kd_cfg["normalize"])
+        logits_kd_shape_note = "enabled"
+        if logits_kd_cfg["enabled"]:
+            logits_kd_loss_fn = LogitsKDLoss(
+                temperature=logits_kd_cfg["temperature"],
+                multi_user_slots=int(cfg["model"].get("multi_user_slots", 6)),
+                slot_classes=int(cfg["model"].get("slot_classes", 10)),
+            )
+        logger.info(
+            "mse_kd enabled=%s source=%s lambda=%.6f warmup_epochs=%d normalize=%s",
+            mse_kd_cfg["enabled"],
+            mse_kd_cfg["source"],
+            mse_kd_cfg["lambda_mse"],
+            mse_kd_cfg["warmup_epochs"],
+            mse_kd_cfg["normalize"],
+        )
+        logger.info(
+            "logits_kd enabled=%s lambda=%.6f temperature=%.3f warmup_epochs=%d note=%s",
+            logits_kd_cfg["enabled"],
+            logits_kd_cfg["lambda_logits"],
+            logits_kd_cfg["temperature"],
+            logits_kd_cfg["warmup_epochs"],
+            logits_kd_shape_note,
+        )
+        logger.info(
+            "teacher_supervised enabled=%s lambda=%.6f warmup_epochs=%d",
+            teacher_supervised_cfg["enabled"],
+            teacher_supervised_cfg["lambda_teacher"],
+            teacher_supervised_cfg["warmup_epochs"],
         )
 
     best_acc = -1.0
@@ -1025,6 +1258,8 @@ def main():
             epoch=epoch + 1,
             cafd_loss_fn=cafd_loss_fn,
             rsd_loss_fn=rsd_loss_fn,
+            mse_kd_loss_fn=mse_kd_loss_fn,
+            logits_kd_loss_fn=logits_kd_loss_fn,
             logger=logger,
             batch_csv_path=run_dir / "metrics" / "train_batches.csv",
         )

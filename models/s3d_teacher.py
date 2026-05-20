@@ -19,6 +19,8 @@ class S3DTeacher(nn.Module):
         checkpoint_path: str = None,
         num_classes: int = None,
         dropout: float = 0.2,
+        trainable_last_blocks: int = 0,
+        trainable_classifier: bool = False,
     ):
         super().__init__()
         init_weights = None if checkpoint_path else _resolve_s3d_weights(weights)
@@ -31,12 +33,26 @@ class S3DTeacher(nn.Module):
         self.checkpoint_load_info = None
         if checkpoint_path:
             self.checkpoint_extra, self.checkpoint_load_info = self._load_video_teacher_checkpoint(checkpoint_path)
+        self.trainable_last_blocks = max(int(trainable_last_blocks), 0)
+        self.trainable_classifier = bool(trainable_classifier)
+        self.partial_train = bool(freeze) and (self.trainable_last_blocks > 0 or self.trainable_classifier)
         if freeze:
             for parameter in self.model.parameters():
                 parameter.requires_grad = False
-        self.freeze = freeze
+            self._unfreeze_partial_modules()
+        self.freeze = bool(freeze) and not self.partial_train
         if self.freeze:
             self.model.eval()
+
+    def _unfreeze_partial_modules(self):
+        children = list(self.model.features.children())
+        if self.trainable_last_blocks > 0:
+            for module in children[-self.trainable_last_blocks:]:
+                for parameter in module.parameters():
+                    parameter.requires_grad = True
+        if self.trainable_classifier:
+            for parameter in self.model.classifier.parameters():
+                parameter.requires_grad = True
 
     def _replace_classifier(self, num_classes: int, dropout: float):
         in_channels = self.model.classifier[1].in_channels
@@ -112,4 +128,11 @@ class S3DTeacher(nn.Module):
         super().train(mode)
         if self.freeze:
             self.model.eval()
+        elif self.partial_train:
+            children = list(self.model.features.children())
+            frozen_until = max(len(children) - self.trainable_last_blocks, 0)
+            for module in children[:frozen_until]:
+                module.eval()
+            if not self.trainable_classifier:
+                self.model.classifier.eval()
         return self
