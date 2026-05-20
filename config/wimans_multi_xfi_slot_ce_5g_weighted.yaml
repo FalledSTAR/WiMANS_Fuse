@@ -1,0 +1,92 @@
+experiment:
+  name: wimans_classroom_5g_multi_xfi_slot_ce_weighted_empty03
+  seed: 39
+  output_dir: output
+
+data:
+  root: ../dataset
+  annotation: ../dataset/annotation.csv
+  wifi_band: ["5"]
+  environment: ["classroom"]
+  num_users: ["0", "1", "2", "3", "4", "5"]
+  user_mode: multi
+  label_mode: multi_slot_ce
+  target_len: 3000
+  pad_mode: left
+  truncate_mode: tail
+  normalize: none
+  sample_limit: null
+  test_size: 0.2
+
+video:
+  use_video: false
+  online_read: true
+  freeze_s3d: true
+  s3d_weights: kinetics400
+  teacher_checkpoint: ../backbone_models/video/video_s3d.pt
+  num_frames: 90
+
+model:
+  wifi_backbone: xfi_resnet18
+  wifi_student: token_pool
+  xfi_weight_path: ../backbone_models/WiFi/wifi_ResNet18.pt
+  wifi_input_channels: 270
+  num_classes: 60
+  multi_user_slots: 6
+  slot_classes: 10
+
+loss:
+  slot_ce_empty_weight: 0.3
+  slot_ce_activity_weight: 1.0
+
+projector:
+  enable: false
+  target: video_feature
+  freeze_video_projector: true
+  use_projector_logits: false
+  hidden_dim: 256
+  out_dim: 256
+  num_heads: 2
+  dropout: 0.2
+
+cafd:
+  enable: false
+  temperature: 0.1
+  lambda_cafd: 0.0
+
+rsd:
+  enable: false
+  source: distill
+  lambda_rsd: 0.0
+  kappa: 0.01
+  gamma: 2
+  warmup_epochs: 5
+  reduction: sum
+
+train:
+  epochs: 200
+  batch_size: 128
+  num_workers: 0
+  log_interval: 20
+  lr_backbone: 1.0e-4
+  lr_head: 1.0e-3
+  lr_projector: 1.0e-3
+  weight_decay: 0.0
+  bce_pos_weight: 6.0
+  amp: false
+  device: auto
+  scheduler:
+    factor: 0.5
+    patience: 30
+    min_lr: 1.0e-6
+
+test:
+  checkpoint: null
+  threshold: 0.5
+
+logging:
+  compute_flops: true
+  flops_video_frames: 16
+  save_epoch_predictions: false
+  save_best_detailed_predictions: true
+  save_compact_predictions: true

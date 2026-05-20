@@ -207,6 +207,7 @@ Slot-wise CrossEntropy comparison:
 
 ```powershell
 python train.py --config config\wimans_multi_cnn1d_slot_ce.yaml --stage v0
+python train.py --config config\wimans_multi_xfi_slot_ce_5g.yaml --stage v0
 ```
 
 This config treats each user slot as a 10-class single-label problem:
@@ -215,6 +216,18 @@ This config treats each user slot as a 10-class single-label problem:
 same 9-bit activity slot vectors before computing `official_slot_acc`.
 Always inspect `active_slot_acc` and `sample_exact_acc` together with
 `official_slot_acc`, because the official metric includes empty slots.
+
+Weighted slot-wise CrossEntropy can reduce the influence of the easy
+`empty_slot` class and emphasize activity recognition:
+
+```powershell
+python train.py --config config\wimans_multi_xfi_slot_ce_5g_weighted.yaml --stage v0
+python train.py --config config\wimans_multi_xfi_slot_ce_5g.yaml --stage v0 --slot-ce-empty-weight 0.5 --slot-ce-activity-weight 1.0
+python train.py --config config\wimans_multi_xfi_slot_ce_5g.yaml --stage v0 --slot-ce-empty-weight 0.2 --slot-ce-activity-weight 1.0
+```
+
+Use `official_slot_acc` for WiMANS comparability, but decide whether weighting
+helps mainly from `active_slot_acc` and `sample_exact_acc`.
 
   The primary metric is `official_slot_acc`, matching the WiMANS-style exact
   9-way vector match per user slot. For `multi_bce`, predictions come from
