@@ -358,6 +358,70 @@ def get_current_lrs(optimizer) -> dict:
     return lrs
 
 
+def rewrite_csv_rows(path: Path, rows, fieldnames) -> None:
+    path.unlink(missing_ok=True)
+    append_csv_rows(path, rows, fieldnames)
+
+
+def refresh_top_prediction_files(
+    run_dir: Path,
+    top_records: list,
+    prediction_fieldnames: list,
+    compact_prediction_fieldnames: list,
+    save_detailed: bool,
+    save_compact: bool,
+    logger=None,
+) -> None:
+    top_dir = run_dir / "splits" / "top_predictions"
+    top_dir.mkdir(parents=True, exist_ok=True)
+    for old_file in top_dir.glob("val_predictions_top*.csv"):
+        old_file.unlink(missing_ok=True)
+    summary_rows = []
+    for rank, record in enumerate(top_records, start=1):
+        epoch = int(record["epoch"])
+        val_acc = float(record["val_acc"])
+        prefix = f"top{rank:02d}_epoch_{epoch:03d}_acc_{val_acc:.6f}"
+        detailed_path = None
+        compact_path = None
+        if save_detailed and record["prediction_rows"]:
+            detailed_path = top_dir / f"val_predictions_{prefix}.csv"
+            rewrite_csv_rows(detailed_path, record["prediction_rows"], prediction_fieldnames)
+        if save_compact and record["compact_prediction_rows"]:
+            compact_path = top_dir / f"val_predictions_{prefix}_compact.csv"
+            rewrite_csv_rows(compact_path, record["compact_prediction_rows"], compact_prediction_fieldnames)
+        epoch_result = record["epoch_result"]
+        summary_rows.append(
+            {
+                "rank": rank,
+                "epoch": epoch,
+                "val_acc": val_acc,
+                "val_loss": record["val_loss"],
+                "official_slot_acc": epoch_result.get("official_slot_acc"),
+                "active_slot_acc": epoch_result.get("active_slot_acc"),
+                "sample_exact_acc": epoch_result.get("sample_exact_acc"),
+                "detailed_file": "" if detailed_path is None else detailed_path.name,
+                "compact_file": "" if compact_path is None else compact_path.name,
+            }
+        )
+    rewrite_csv_rows(
+        top_dir / "top_epochs.csv",
+        summary_rows,
+        [
+            "rank",
+            "epoch",
+            "val_acc",
+            "val_loss",
+            "official_slot_acc",
+            "active_slot_acc",
+            "sample_exact_acc",
+            "detailed_file",
+            "compact_file",
+        ],
+    )
+    if logger is not None:
+        logger.info("refreshed_top_prediction_files=%s count=%d", top_dir, len(top_records))
+
+
 def get_cafd_cfg(cfg) -> dict:
     cafd_cfg = cfg.get("cafd", {})
     lambda_cafd = float(cafd_cfg.get("lambda_cafd", 0.0))
@@ -1221,6 +1285,7 @@ def main():
     best_acc = -1.0
     checkpoint_dir = run_dir / "checkpoints"
     epoch_rows = []
+    top_prediction_records = []
     epoch_csv_fieldnames = [
         "epoch",
         "train_loss",
@@ -1272,6 +1337,7 @@ def main():
         save_epoch_predictions = bool(logging_cfg.get("save_epoch_predictions", True))
         save_best_detailed_predictions = bool(logging_cfg.get("save_best_detailed_predictions", True))
         save_compact_predictions = bool(logging_cfg.get("save_compact_predictions", True))
+        save_topk_predictions = max(int(logging_cfg.get("save_topk_predictions", 10)), 0)
         prediction_fieldnames = list(prediction_rows[0].keys()) if prediction_rows else []
         compact_prediction_rows_epoch = compact_prediction_rows(prediction_rows)
         compact_prediction_fieldnames = list(compact_prediction_rows_epoch[0].keys()) if compact_prediction_rows_epoch else []
@@ -1311,6 +1377,32 @@ def main():
             lrs=new_lrs,
         )
         epoch_results.append(epoch_result)
+
+        if prediction_rows and save_topk_predictions > 0:
+            top_prediction_records.append(
+                {
+                    "epoch": epoch + 1,
+                    "val_acc": val_acc,
+                    "val_loss": val_loss,
+                    "epoch_result": epoch_result,
+                    "prediction_rows": list(prediction_rows),
+                    "compact_prediction_rows": list(compact_prediction_rows_epoch),
+                }
+            )
+            top_prediction_records = sorted(
+                top_prediction_records,
+                key=lambda item: (float(item["val_acc"]), -int(item["epoch"])),
+                reverse=True,
+            )[:save_topk_predictions]
+            refresh_top_prediction_files(
+                run_dir,
+                top_prediction_records,
+                prediction_fieldnames,
+                compact_prediction_fieldnames,
+                save_detailed=save_best_detailed_predictions,
+                save_compact=save_compact_predictions,
+                logger=logger,
+            )
 
         epoch_rows.append(
             {
