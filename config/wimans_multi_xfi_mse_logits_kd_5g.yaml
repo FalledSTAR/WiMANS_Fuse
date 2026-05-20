@@ -1,0 +1,116 @@
+experiment:
+  name: wimans_classroom_5g_multi_xfi_mse_logits_kd
+  seed: 39
+  output_dir: output
+
+data:
+  root: ../dataset
+  annotation: ../dataset/annotation.csv
+  wifi_band: ["5"]
+  environment: ["classroom"]
+  num_users: ["0", "1", "2", "3", "4", "5"]
+  user_mode: multi
+  label_mode: multi_slot_ce
+  target_len: 3000
+  pad_mode: left
+  truncate_mode: tail
+  normalize: none
+  sample_limit: null
+  test_size: 0.2
+
+video:
+  use_video: true
+  online_read: true
+  freeze_s3d: true
+  s3d_trainable_last_blocks: 2
+  s3d_trainable_classifier: false
+  s3d_weights: kinetics400
+  teacher_checkpoint: ../backbone_models/video/video_s3d.pt
+  num_frames: 90
+  log_teacher_accuracy: true
+  return_teacher_logits: true
+
+model:
+  wifi_backbone: xfi_resnet18
+  wifi_student: token_pool
+  xfi_weight_path: ../backbone_models/WiFi/wifi_ResNet18.pt
+  wifi_input_channels: 270
+  num_classes: 60
+  multi_user_slots: 6
+  slot_classes: 10
+
+loss:
+  slot_ce_class_weights: null
+  slot_ce_empty_weight: 0.5
+  slot_ce_activity_weight: 1.0
+
+projector:
+  enable: true
+  target: projected
+  freeze_video_projector: false
+  freeze_projector_classifier: false
+  require_projector_checkpoint: false
+  use_projector_logits: true
+  hidden_dim: 256
+  out_dim: 256
+  num_heads: 2
+  dropout: 0.2
+
+teacher_supervised:
+  enable: true
+  lambda_teacher: 1.0
+  warmup_epochs: 0
+
+mse_kd:
+  enable: true
+  source: projected
+  lambda_mse: 0.05
+  warmup_epochs: 5
+  normalize: true
+
+logits_kd:
+  enable: true
+  temperature: 4.0
+  lambda_logits: 0.05
+  warmup_epochs: 10
+
+cafd:
+  enable: false
+  temperature: 0.1
+  lambda_cafd: 0.0
+
+rsd:
+  enable: false
+  source: distill
+  lambda_rsd: 0.0
+  kappa: 0.01
+  gamma: 2
+  warmup_epochs: 10
+  reduction: sum
+
+train:
+  epochs: 80
+  batch_size: 8
+  num_workers: 0
+  log_interval: 20
+  lr_backbone: 1.0e-4
+  lr_head: 5.0e-4
+  lr_projector: 5.0e-4
+  weight_decay: 0.0
+  amp: false
+  device: auto
+  scheduler:
+    factor: 0.5
+    patience: 15
+    min_lr: 1.0e-6
+
+test:
+  checkpoint: null
+  threshold: 0.5
+
+logging:
+  compute_flops: true
+  flops_video_frames: 16
+  save_epoch_predictions: false
+  save_best_detailed_predictions: true
+  save_compact_predictions: true

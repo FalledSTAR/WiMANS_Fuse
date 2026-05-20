@@ -39,11 +39,15 @@ class VideoWiFiCAFDModel(nn.Module):
         s3d_weights: str = "kinetics400",
         teacher_checkpoint_path: str = None,
         freeze_s3d: bool = True,
+        s3d_trainable_last_blocks: int = 0,
+        s3d_trainable_classifier: bool = False,
         projector_hidden_dim: int = 256,
         projector_out_dim: int = 256,
         projector_num_heads: int = 2,
         projector_target: str = "video_feature",
         freeze_video_projector: bool = True,
+        freeze_projector_classifier: bool = True,
+        require_projector_checkpoint: bool = True,
         use_projector_logits: bool = True,
         projector_dropout: float = 0.2,
         rsd_gamma: int = 2,
@@ -68,6 +72,8 @@ class VideoWiFiCAFDModel(nn.Module):
             freeze=freeze_s3d,
             checkpoint_path=teacher_checkpoint_path,
             num_classes=num_classes,
+            trainable_last_blocks=s3d_trainable_last_blocks,
+            trainable_classifier=s3d_trainable_classifier,
         )
         wifi_projector_out_dim = (
             self.video_teacher.output_dim if projector_target == "video_feature" else projector_out_dim
@@ -108,11 +114,13 @@ class VideoWiFiCAFDModel(nn.Module):
                 if self.video_projector_checkpoint_load_info is None
                 else int(self.video_projector_checkpoint_load_info["loaded_keys"])
             )
-            if projector_loaded_keys == 0:
+            if projector_loaded_keys == 0 and (require_projector_checkpoint or freeze_video_projector):
                 raise ValueError(
                     "projector_target='projected' requires a teacher checkpoint with video_projector.* weights"
                 )
-            if self.use_projector_logits_requested and not self.projector_classifier_available:
+            if self.use_projector_logits_requested and not self.projector_classifier_available and (
+                require_projector_checkpoint or freeze_projector_classifier
+            ):
                 raise ValueError(
                     "use_projector_logits=True requires a teacher checkpoint with projector_classifier.* weights"
                 )
@@ -120,9 +128,11 @@ class VideoWiFiCAFDModel(nn.Module):
         if self.freeze_video_projector:
             for parameter in self.video_projector.parameters():
                 parameter.requires_grad = False
-        for parameter in self.projector_classifier.parameters():
-            parameter.requires_grad = False
-        self.projector_classifier.eval()
+        self.freeze_projector_classifier = bool(freeze_projector_classifier)
+        if self.freeze_projector_classifier:
+            for parameter in self.projector_classifier.parameters():
+                parameter.requires_grad = False
+            self.projector_classifier.eval()
         if self._should_use_projector_logits():
             self.teacher_logits_source = "projector_classifier"
         elif self.return_teacher_logits:
@@ -202,7 +212,7 @@ class VideoWiFiCAFDModel(nn.Module):
         return (
             self.projector_target == "projected"
             and self.use_projector_logits_requested
-            and self.projector_classifier_available
+            and (self.projector_classifier_available or not getattr(self, "freeze_projector_classifier", True))
         )
 
     def forward(self, wifi, video):
@@ -228,7 +238,8 @@ class VideoWiFiCAFDModel(nn.Module):
         projector_logits = None
         teacher_logits = s3d_logits
         if self._should_use_projector_logits():
-            with torch.no_grad():
+            context = torch.no_grad() if self.freeze_projector_classifier else torch.enable_grad()
+            with context:
                 projector_logits = self.projector_classifier(video_projected)
             teacher_logits = projector_logits
         return {
@@ -250,5 +261,6 @@ class VideoWiFiCAFDModel(nn.Module):
         super().train(mode)
         if self.freeze_video_projector:
             self.video_projector.eval()
-        self.projector_classifier.eval()
+        if self.freeze_projector_classifier:
+            self.projector_classifier.eval()
         return self
