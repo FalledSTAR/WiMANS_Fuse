@@ -1,5 +1,5 @@
 experiment:
-  name: wimans_classroom_5g_multi_xfi_mse_logits_kd
+  name: wimans_classroom_5g_multi_xfi_s3d_feature_logits_kd
   seed: 39
   output_dir: output
 
@@ -22,10 +22,10 @@ video:
   use_video: true
   online_read: true
   freeze_s3d: true
-  s3d_trainable_last_blocks: 2
+  s3d_trainable_last_blocks: 0
   s3d_trainable_classifier: false
   s3d_weights: kinetics400
-  teacher_checkpoint: ../backbone_models/video/video_s3d.pt
+  teacher_checkpoint: ../backbone_models/video/video_s3d_multi.pt
   num_frames: 90
   log_teacher_accuracy: true
   return_teacher_logits: true
@@ -46,25 +46,25 @@ loss:
 
 projector:
   enable: true
-  target: projected
-  freeze_video_projector: false
-  freeze_projector_classifier: false
+  target: video_feature
+  freeze_video_projector: true
+  freeze_projector_classifier: true
   require_projector_checkpoint: false
-  use_projector_logits: true
+  use_projector_logits: false
   hidden_dim: 256
   out_dim: 256
   num_heads: 2
   dropout: 0.2
 
 teacher_supervised:
-  enable: true
-  lambda_teacher: 1.0
+  enable: false
+  lambda_teacher: 0.0
   warmup_epochs: 0
 
 mse_kd:
   enable: true
-  source: projected
-  lambda_mse: 0.05
+  source: video_feature
+  lambda_mse: 5.0
   warmup_epochs: 5
   normalize: true
 
