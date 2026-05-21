@@ -529,8 +529,13 @@ def safe_teacher_accuracy(teacher_logits: torch.Tensor, labels: torch.Tensor, la
         if labels.ndim == 1 and teacher_logits.ndim == 2 and teacher_logits.shape[0] == labels.shape[0]:
             return accuracy_for_mode(teacher_logits.detach(), labels.detach(), label_mode, threshold=threshold)
         return None
-    if label_mode in {"multi_bce", "multi_slot_ce"}:
+    if label_mode == "multi_bce":
         target_dim = int(labels.reshape(labels.shape[0], -1).shape[-1])
+        if teacher_logits.ndim == 2 and teacher_logits.shape[-1] == target_dim:
+            return accuracy_for_mode(teacher_logits.detach(), labels.detach(), label_mode, threshold=threshold)
+        return None
+    if label_mode == "multi_slot_ce":
+        target_dim = int(labels.reshape(labels.shape[0], -1).shape[-1]) * 10
         if teacher_logits.ndim == 2 and teacher_logits.shape[-1] == target_dim:
             return accuracy_for_mode(teacher_logits.detach(), labels.detach(), label_mode, threshold=threshold)
         return None
